@@ -13,6 +13,14 @@ on:
         description: Source tag or ref to publish.
         required: true
         type: string
+      solution:
+        description: Optional solution path in the source repository.
+        required: false
+        type: string
+      package_project:
+        description: Optional package project path in the source repository.
+        required: false
+        type: string
 
 permissions:
   id-token: write
@@ -27,6 +35,8 @@ jobs:
     env:
       SOURCE_REPOSITORY: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
       SOURCE_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+      SOURCE_SOLUTION: ${{ github.event.client_payload.solution || github.event.inputs.solution }}
+      SOURCE_PACKAGE_PROJECT: ${{ github.event.client_payload.package_project || github.event.inputs.package_project }}
 
     steps:
       - name: Validate publish request
@@ -49,8 +59,48 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Locate package inputs
+        id: package_inputs
+        shell: pwsh
+        run: |
+          $solution = $env:SOURCE_SOLUTION
+
+          if ([string]::IsNullOrWhiteSpace($solution)) {
+            $solutions = @(Get-ChildItem -LiteralPath . -Filter *.sln -File)
+
+            if ($solutions.Count -ne 1) {
+              throw "Expected exactly one solution file, found $($solutions.Count)."
+            }
+
+            $solution = "./$($solutions[0].Name)"
+          }
+
+          $packageProject = $env:SOURCE_PACKAGE_PROJECT
+
+          if ([string]::IsNullOrWhiteSpace($packageProject)) {
+            $srcPath = Join-Path (Get-Location) 'src'
+
+            if (-not (Test-Path -LiteralPath $srcPath)) {
+              throw "Expected a src directory containing one package project."
+            }
+
+            $packageProjects = @(Get-ChildItem -LiteralPath $srcPath -Recurse -Filter *.csproj -File)
+
+            if ($packageProjects.Count -ne 1) {
+              throw "Expected exactly one package project under src, found $($packageProjects.Count)."
+            }
+
+            $packageProject = (Resolve-Path -Relative -Path $packageProjects[0].FullName).Replace('\', '/')
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "solution=$solution"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "package_project=$packageProject"
+
       - name: Build and pack
-        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@v1
+        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@feat/build-pack-nuget-composite
+        with:
+          solution: ${{ steps.package_inputs.outputs.solution }}
+          package-project: ${{ steps.package_inputs.outputs.package_project }}
 
       - name: Locate package
         id: package
