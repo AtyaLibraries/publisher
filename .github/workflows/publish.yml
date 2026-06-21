@@ -1,0 +1,85 @@
+name: Publish NuGet package
+
+on:
+  repository_dispatch:
+    types: [publish-package]
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Source repository to publish, in owner/name form.
+        required: true
+        type: string
+      ref:
+        description: Source tag or ref to publish.
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  attestations: write
+  contents: read
+
+jobs:
+  publish:
+    name: Publish NuGet package
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SOURCE_REPOSITORY: ${{ github.event.client_payload.repository || inputs.repository }}
+      SOURCE_REF: ${{ github.event.client_payload.ref || inputs.ref }}
+
+    steps:
+      - name: Validate publish request
+        shell: bash
+        run: |
+          test -n "$SOURCE_REPOSITORY"
+          test -n "$SOURCE_REF"
+
+      - name: Checkout package source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
+          # Public package repos work with the default token. If a private package
+          # repo becomes a target, add a checkout token input at that time.
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build and pack
+        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@v1
+
+      - name: Locate package
+        id: package
+        shell: bash
+        run: |
+          mapfile -t packages < <(find . -type f -name '*.nupkg' ! -name '*.symbols.nupkg' | sort)
+
+          if [ "${#packages[@]}" -ne 1 ]; then
+            printf 'Expected exactly one package, found %s:\n' "${#packages[@]}"
+            printf '%s\n' "${packages[@]}"
+            exit 1
+          fi
+
+          echo "path=${packages[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to NuGet.org
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ArsenAsulyan
+
+      - name: Push package
+        shell: bash
+        run: |
+          dotnet nuget push "${{ steps.package.outputs.path }}" \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json
+
+      - name: Attest package provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.package.outputs.path }}
