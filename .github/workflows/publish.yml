@@ -123,7 +123,7 @@ jobs:
           fi
 
       - name: Build and pack
-        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@feat/build-pack-nuget-composite
+        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@12bd0f142d443058477bcb167bad4b4f063de994
         with:
           solution: ${{ steps.package_inputs.outputs.solution }}
           package-project: ${{ steps.package_inputs.outputs.package_project }}
