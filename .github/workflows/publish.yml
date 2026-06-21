@@ -21,6 +21,11 @@ on:
         description: Optional package project path in the source repository.
         required: false
         type: string
+      global_json:
+        description: Optional global.json path in the source repository.
+        required: false
+        default: global.json
+        type: string
 
 permissions:
   id-token: write
@@ -37,6 +42,7 @@ jobs:
       SOURCE_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
       SOURCE_SOLUTION: ${{ github.event.client_payload.solution || github.event.inputs.solution }}
       SOURCE_PACKAGE_PROJECT: ${{ github.event.client_payload['package-project'] || github.event.client_payload.package_project || github.event.inputs.package_project }}
+      SOURCE_GLOBAL_JSON: ${{ github.event.client_payload['global-json'] || github.event.client_payload.global_json || github.event.inputs.global_json || 'global.json' }}
 
     steps:
       - name: Validate publish request
@@ -57,7 +63,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          global-json-file: global.json
+          global-json-file: ${{ env.SOURCE_GLOBAL_JSON }}
 
       - name: Locate package inputs
         id: package_inputs
