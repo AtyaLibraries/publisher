@@ -96,6 +96,32 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "solution=$solution"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "package_project=$packageProject"
 
+      - name: Determine package version
+        shell: bash
+        run: |
+          package_version=""
+
+          case "$SOURCE_REF" in
+            refs/tags/v*)
+              package_version="${SOURCE_REF#refs/tags/v}"
+              ;;
+            v*)
+              package_version="${SOURCE_REF#v}"
+              ;;
+          esac
+
+          if [ -n "$package_version" ]; then
+            if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+              echo "::error::Source ref '$SOURCE_REF' does not contain a SemVer package version."
+              exit 1
+            fi
+
+            {
+              echo "PACKAGE_VERSION=$package_version"
+              echo "MINVERVERSIONOVERRIDE=$package_version"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: Build and pack
         uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@feat/build-pack-nuget-composite
         with:
