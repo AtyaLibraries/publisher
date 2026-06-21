@@ -36,7 +36,7 @@ jobs:
       SOURCE_REPOSITORY: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
       SOURCE_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
       SOURCE_SOLUTION: ${{ github.event.client_payload.solution || github.event.inputs.solution }}
-      SOURCE_PACKAGE_PROJECT: ${{ github.event.client_payload.package_project || github.event.inputs.package_project }}
+      SOURCE_PACKAGE_PROJECT: ${{ github.event.client_payload['package-project'] || github.event.client_payload.package_project || github.event.inputs.package_project }}
 
     steps:
       - name: Validate publish request
