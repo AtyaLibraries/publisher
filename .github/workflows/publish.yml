@@ -51,8 +51,24 @@ jobs:
           test -n "$SOURCE_REPOSITORY"
           test -n "$SOURCE_REF"
 
+          case "$SOURCE_REPOSITORY" in
+            AtyaLibraries/*) ;;
+            *)
+              echo "::error::Refusing non-AtyaLibraries repository '$SOURCE_REPOSITORY'."
+              exit 1
+              ;;
+          esac
+
+          case "$SOURCE_REF" in
+            v*|refs/tags/v*) ;;
+            *)
+              echo "::error::Refusing non-release ref '$SOURCE_REF'."
+              exit 1
+              ;;
+          esac
+
       - name: Checkout package source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ env.SOURCE_REPOSITORY }}
           ref: ${{ env.SOURCE_REF }}
@@ -61,7 +77,7 @@ jobs:
           # repo becomes a target, add a checkout token input at that time.
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: ${{ env.SOURCE_GLOBAL_JSON }}
 
@@ -148,9 +164,60 @@ jobs:
 
           echo "path=${packages[0]}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate package repository metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $packagePath = $env:PACKAGE_PATH
+          $expected = $env:EXPECTED_REPOSITORY_URL.TrimEnd('/')
+
+          $package = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
+          try {
+            $nuspecEntries = @($package.Entries | Where-Object { $_.FullName.EndsWith('.nuspec', [StringComparison]::OrdinalIgnoreCase) })
+
+            if ($nuspecEntries.Count -ne 1) {
+              throw "Expected exactly one nuspec in '$packagePath', found $($nuspecEntries.Count)."
+            }
+
+            $stream = $nuspecEntries[0].Open()
+            try {
+              $reader = New-Object System.IO.StreamReader($stream)
+              try {
+                [xml]$nuspec = $reader.ReadToEnd()
+              }
+              finally {
+                $reader.Dispose()
+              }
+            }
+            finally {
+              $stream.Dispose()
+            }
+
+            $actual = [string]$nuspec.package.metadata.repository.url
+            $actual = $actual.TrimEnd('/')
+
+            if ($actual.EndsWith('.git', [StringComparison]::OrdinalIgnoreCase)) {
+              $actual = $actual.Substring(0, $actual.Length - 4)
+            }
+
+            if ($actual -ne $expected) {
+              throw "Package repository URL '$actual' does not match source repository '$expected'."
+            }
+
+            Write-Output "Package repository URL verified: $actual"
+          }
+          finally {
+            $package.Dispose()
+          }
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+          EXPECTED_REPOSITORY_URL: https://github.com/${{ env.SOURCE_REPOSITORY }}
+
       - name: Log in to NuGet.org
         id: login
-        uses: NuGet/login@v1
+        uses: NuGet/login@ebc737b6fc418a6ca0073cf116ec8dc156d8b81e # v1
         with:
           user: ArsenAsulyan
 
@@ -162,6 +229,6 @@ jobs:
             --source https://api.nuget.org/v3/index.json
 
       - name: Attest package provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
           subject-path: ${{ steps.package.outputs.path }}
