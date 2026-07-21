@@ -105,6 +105,7 @@ jobs:
           REQUEST_PACKAGE_PROJECT: ${{ steps.request.outputs.package_project }}
         run: |
           $ErrorActionPreference = 'Stop'
+          Import-Module ../trusted-publisher/scripts/PublisherSecurity.psm1 -Force
           $solution = $env:REQUEST_SOLUTION
           if ([string]::IsNullOrWhiteSpace($solution)) {
             $solutions = @(Get-ChildItem -LiteralPath . -Filter *.sln -File)
@@ -125,6 +126,9 @@ jobs:
             }
             $packageProject = (Resolve-Path -Relative -LiteralPath $packageProjects[0].FullName).Replace('\', '/').TrimStart('./')
           }
+
+          $solution = ConvertTo-SafeRelativePath -Path $solution -Name 'solution'
+          $packageProject = ConvertTo-SafeRelativePath -Path $packageProject -Name 'package project'
 
           if (-not (Test-Path -LiteralPath $solution -PathType Leaf) -or
               -not (Test-Path -LiteralPath $packageProject -PathType Leaf)) {

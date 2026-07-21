@@ -31,7 +31,9 @@ function ConvertTo-CanonicalReleaseRef {
         throw 'The source ref is not an immutable release tag.'
     }
 
-    if ($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$') {
+    $numericIdentifier = '(?:0|[1-9][0-9]*)'
+    $preReleaseIdentifier = '(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+    if ($version -cnotmatch "^$numericIdentifier\.$numericIdentifier\.$numericIdentifier(?:-$preReleaseIdentifier(?:\.$preReleaseIdentifier)*)?$") {
         throw 'The release tag does not contain a supported semantic version.'
     }
 
@@ -55,6 +57,7 @@ function ConvertTo-SafeRelativePath {
     }
 
     if ($Path.Length -gt 240 -or $Path.Contains('\') -or $Path.StartsWith('/') -or
+        $Path.EndsWith('/') -or $Path.Contains('//') -or
         $Path -cnotmatch '^[A-Za-z0-9._/-]+$') {
         throw "$Name is not a safe repository-relative path."
     }
@@ -107,7 +110,12 @@ function Read-PackageIdentity {
         [long] $MaximumNuspecBytes = 1048576
     )
 
-    $file = Get-Item -LiteralPath $PackagePath -ErrorAction Stop
+    try {
+        $file = Get-Item -LiteralPath $PackagePath -ErrorAction Stop
+    }
+    catch {
+        throw 'The package artifact is missing, empty, oversized, or has an invalid extension.'
+    }
     if (-not $file.PSIsContainer -and $file.Extension -ceq '.nupkg' -and
         $file.Length -gt 0 -and $file.Length -le $MaximumPackageBytes) {
         # Continue.
@@ -117,7 +125,12 @@ function Read-PackageIdentity {
     }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [IO.Compression.ZipFile]::OpenRead($file.FullName)
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead($file.FullName)
+    }
+    catch {
+        throw 'The package artifact is not a valid ZIP archive.'
+    }
     try {
         if ($archive.Entries.Count -gt $MaximumEntries) {
             throw 'The package contains too many entries.'
@@ -142,33 +155,48 @@ function Read-PackageIdentity {
             $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
             $settings.XmlResolver = $null
             $settings.MaxCharactersInDocument = $MaximumNuspecBytes
-            $reader = [Xml.XmlReader]::Create($stream, $settings)
+            $reader = $null
             try {
-                $document = [Xml.XmlDocument]::new()
-                $document.XmlResolver = $null
-                $document.Load($reader)
+                $reader = [Xml.XmlReader]::Create($stream, $settings)
+                try {
+                    $document = [Xml.XmlDocument]::new()
+                    $document.XmlResolver = $null
+                    $document.Load($reader)
+                }
+                finally {
+                    if ($null -ne $reader) { $reader.Dispose() }
+                }
             }
-            finally {
-                $reader.Dispose()
+            catch {
+                throw 'The package nuspec is not valid safe XML.'
             }
         }
         finally {
             $stream.Dispose()
         }
 
+        if ($null -eq $document.DocumentElement -or $document.DocumentElement.LocalName -cne 'package') {
+            throw 'The package nuspec does not contain a package root element.'
+        }
+
         $manager = [Xml.XmlNamespaceManager]::new($document.NameTable)
         $namespace = $document.DocumentElement.NamespaceURI
         if ($namespace) {
             $manager.AddNamespace('n', $namespace)
-            $metadata = $document.SelectSingleNode('/n:package/n:metadata', $manager)
+            $metadataNodes = @($document.SelectNodes('/n:package/n:metadata', $manager))
         }
         else {
-            $metadata = $document.SelectSingleNode('/package/metadata')
+            $metadataNodes = @($document.SelectNodes('/package/metadata'))
         }
 
-        if ($null -eq $metadata) { throw 'The package nuspec does not contain metadata.' }
-        $idNodes = @($metadata.ChildNodes | Where-Object LocalName -CEQ 'id')
-        $repositoryNodes = @($metadata.ChildNodes | Where-Object LocalName -CEQ 'repository')
+        if ($metadataNodes.Count -ne 1) { throw 'The package nuspec must contain exactly one metadata element.' }
+        $metadata = $metadataNodes[0]
+        $idNodes = @($metadata.ChildNodes | Where-Object {
+            $_ -is [Xml.XmlElement] -and $_.LocalName -ceq 'id' -and $_.NamespaceURI -ceq $namespace
+        })
+        $repositoryNodes = @($metadata.ChildNodes | Where-Object {
+            $_ -is [Xml.XmlElement] -and $_.LocalName -ceq 'repository' -and $_.NamespaceURI -ceq $namespace
+        })
         if ($idNodes.Count -ne 1 -or $repositoryNodes.Count -ne 1) {
             throw 'The package nuspec must contain exactly one id and repository element.'
         }

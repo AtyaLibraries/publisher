@@ -31,8 +31,12 @@ function Assert-True([bool] $Value, [string] $Message) {
     if (-not $Value) { throw $Message }
 }
 
-function Assert-Throws([scriptblock] $Body) {
-    try { & $Body } catch { return }
+function Assert-Throws([string] $ExpectedMessage, [scriptblock] $Body) {
+    try { & $Body }
+    catch {
+        Assert-Equal $ExpectedMessage $_.Exception.Message
+        return
+    }
     throw 'Expected the operation to fail closed.'
 }
 
@@ -45,7 +49,10 @@ function New-TestPackage {
         [switch] $MalformedXml,
         [switch] $MissingId,
         [switch] $DuplicateId,
-        [switch] $MissingRepository
+        [switch] $MissingRepository,
+        [switch] $DuplicateMetadata,
+        [switch] $ForeignIdentityNamespace,
+        [string] $DefaultNamespace = ''
     )
 
     $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
@@ -60,9 +67,16 @@ function New-TestPackage {
                         $writer.Write('<package><metadata>')
                     }
                     else {
-                        $id = if ($MissingId) { '' } elseif ($DuplicateId) { "<id>$PackageId</id><id>$PackageId</id>" } else { "<id>$PackageId</id>" }
-                        $repository = if ($MissingRepository) { '' } else { "<repository type=`"git`" url=`"$RepositoryUrl`" />" }
-                        $writer.Write("<?xml version=`"1.0`"?><package><metadata>$id<version>1.2.3</version>$repository</metadata></package>")
+                        $escapedId = [Security.SecurityElement]::Escape($PackageId)
+                        $escapedUrl = [Security.SecurityElement]::Escape($RepositoryUrl)
+                        $prefix = if ($ForeignIdentityNamespace) { 'foreign:' } else { '' }
+                        $foreignNamespace = if ($ForeignIdentityNamespace) { ' xmlns:foreign="urn:foreign"' } else { '' }
+                        $defaultNamespaceAttribute = if ($DefaultNamespace) { " xmlns=`"$DefaultNamespace`"" } else { '' }
+                        $id = if ($MissingId) { '' } elseif ($DuplicateId) { "<id>$escapedId</id><id>$escapedId</id>" } else { "<$($prefix)id>$escapedId</$($prefix)id>" }
+                        $repository = if ($MissingRepository) { '' } else { "<$($prefix)repository type=`"git`" url=`"$escapedUrl`" />" }
+                        $metadata = "<metadata>$id<version>1.2.3</version>$repository</metadata>"
+                        if ($DuplicateMetadata) { $metadata += $metadata }
+                        $writer.Write("<?xml version=`"1.0`"?><package$defaultNamespaceAttribute$foreignNamespace>$metadata</package>")
                     }
                 }
                 finally { $writer.Dispose() }
@@ -83,6 +97,11 @@ $temp = Join-Path ([IO.Path]::GetTempPath()) ("publisher-security-" + [Guid]::Ne
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
     $allowlistPath = Join-Path $root 'policy/publisher-allowlist.json'
+    $invalidRepository = 'The source repository identity is not an approved AtyaLibraries owner/name value.'
+    $invalidRef = 'The source ref is not an immutable release tag.'
+    $invalidVersion = 'The release tag does not contain a supported semantic version.'
+    $invalidPath = 'path is not a safe repository-relative path.'
+    $invalidUrl = 'Package repository metadata is not a supported canonical GitHub URL.'
 
     Test-Case 'canonical request passes' {
         Assert-Equal 'AtyaLibraries/Guards' (ConvertTo-CanonicalRepository 'AtyaLibraries/Guards')
@@ -93,13 +112,16 @@ try {
     }
 
     foreach ($repository in @('Other/Guards', 'atyalibraries/Guards', 'AtyaLibraries/Guards.git', 'AtyaLibraries/../Guards', 'AtyaLibraries/Guards/extra')) {
-        Test-Case "unsafe repository fails: $repository" { Assert-Throws { ConvertTo-CanonicalRepository $repository } }
+        Test-Case "unsafe repository fails: $repository" { Assert-Throws $invalidRepository { ConvertTo-CanonicalRepository $repository } }
     }
-    foreach ($ref in @('main', 'refs/heads/v1.2.3', 'V1.2.3', 'v1.2', 'v1.2.3+metadata', 'v1.2.3/other')) {
-        Test-Case "unsafe ref fails: $ref" { Assert-Throws { ConvertTo-CanonicalReleaseRef $ref } }
+    foreach ($ref in @('main', 'refs/heads/v1.2.3', 'V1.2.3')) {
+        Test-Case "unsafe ref fails: $ref" { Assert-Throws $invalidRef { ConvertTo-CanonicalReleaseRef $ref } }
     }
-    foreach ($path in @('../secret', '/tmp/file', 'src\file.csproj', './src/file.csproj', 'src/$file.csproj')) {
-        Test-Case "unsafe path fails: $path" { Assert-Throws { ConvertTo-SafeRelativePath $path 'path' } }
+    foreach ($ref in @('v1.2', 'v1.2.3+metadata', 'v1.2.3/other', 'v01.2.3', 'v1.02.3', 'v1.2.03', 'v1.2.3-01')) {
+        Test-Case "invalid semantic version fails: $ref" { Assert-Throws $invalidVersion { ConvertTo-CanonicalReleaseRef $ref } }
+    }
+    foreach ($path in @('../secret', '/tmp/file', 'src\file.csproj', './src/file.csproj', 'src/$file.csproj', 'src//file.csproj', 'src/file.csproj/')) {
+        Test-Case "unsafe path fails: $path" { Assert-Throws $invalidPath { ConvertTo-SafeRelativePath $path 'path' } }
     }
 
     $validPackage = Join-Path $temp 'valid.nupkg'
@@ -111,82 +133,114 @@ try {
         Assert-Equal 'Atya.Foundation.Guards' $result.PackageId
         Assert-Equal '1.5.1' $result.PolicyVersion
     }
+    Test-Case 'optional canonical dot-git repository URL passes' {
+        Assert-Equal 'AtyaLibraries/Guards' (ConvertFrom-PackageRepositoryUrl 'https://github.com/AtyaLibraries/Guards.git/')
+    }
+
+    $namespacedPackage = Join-Path $temp 'namespaced.nupkg'
+    New-TestPackage -Path $namespacedPackage -DefaultNamespace 'http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd'
+    Test-Case 'standard namespaced nuspec passes' {
+        Assert-Equal 'Atya.Foundation.Guards' (Read-PackageIdentity $namespacedPackage).PackageId
+    }
 
     $unknownPackage = Join-Path $temp 'unknown.nupkg'
     New-TestPackage -Path $unknownPackage -PackageId 'Atya.Unknown.Package' -RepositoryUrl 'https://github.com/AtyaLibraries/Guards'
     Test-Case 'unknown PackageId fails' {
-        Assert-Throws { Test-PackageAuthorization (Read-PackageIdentity $unknownPackage) 'AtyaLibraries/Guards' (Read-PublisherAllowlist $allowlistPath) }
-    }
-
-    Test-Case 'PackageId repository mismatch fails' {
-        Assert-Throws { Test-PackageAuthorization (Read-PackageIdentity $validPackage) 'AtyaLibraries/Results' (Read-PublisherAllowlist $allowlistPath) }
+        Assert-Throws 'The derived package id is not uniquely authorized by publisher policy.' { Test-PackageAuthorization (Read-PackageIdentity $unknownPackage) 'AtyaLibraries/Guards' (Read-PublisherAllowlist $allowlistPath) }
     }
 
     $wrongProvenance = Join-Path $temp 'wrong-provenance.nupkg'
     New-TestPackage -Path $wrongProvenance -RepositoryUrl 'https://github.com/AtyaLibraries/Results'
+    Test-Case 'PackageId-to-repository policy mismatch fails' {
+        Assert-Throws 'The derived package id is not authorized for the requested repository.' { Test-PackageAuthorization (Read-PackageIdentity $wrongProvenance) 'AtyaLibraries/Results' (Read-PublisherAllowlist $allowlistPath) }
+    }
     Test-Case 'nuspec provenance mismatch fails' {
-        Assert-Throws { Test-PackageAuthorization (Read-PackageIdentity $wrongProvenance) 'AtyaLibraries/Guards' (Read-PublisherAllowlist $allowlistPath) }
+        Assert-Throws 'Package repository provenance does not match the requested repository.' { Test-PackageAuthorization (Read-PackageIdentity $wrongProvenance) 'AtyaLibraries/Guards' (Read-PublisherAllowlist $allowlistPath) }
     }
 
     foreach ($case in @(
         @{ Name = 'repository owner case'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/atyalibraries/Guards' },
         @{ Name = 'PackageId case'; Id = 'atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/Guards' },
         @{ Name = 'repository query'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/Guards?ref=main' },
+        @{ Name = 'repository fragment'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/Guards#readme' },
+        @{ Name = 'repository userinfo'; Id = 'Atya.Foundation.Guards'; Url = 'https://user@github.com/AtyaLibraries/Guards' },
+        @{ Name = 'repository port'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com:444/AtyaLibraries/Guards' },
+        @{ Name = 'alternate host'; Id = 'Atya.Foundation.Guards'; Url = 'https://www.github.com/AtyaLibraries/Guards' },
         @{ Name = 'encoded repository'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/%47uards' },
-        @{ Name = 'dot segment repository'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/Other/../Guards' }
+        @{ Name = 'encoded slash'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries%2FGuards' },
+        @{ Name = 'encoded backslash'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries%5CGuards' },
+        @{ Name = 'dot segment repository'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/Other/../Guards' },
+        @{ Name = 'double slash repository'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries//Guards' },
+        @{ Name = 'repository prefix'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/prefix/AtyaLibraries/Guards' },
+        @{ Name = 'repository suffix'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries/Guards/extra' },
+        @{ Name = 'repository backslash'; Id = 'Atya.Foundation.Guards'; Url = 'https://github.com/AtyaLibraries\Guards' }
     )) {
         $path = Join-Path $temp (($case.Name -replace ' ', '-') + '.nupkg')
         New-TestPackage -Path $path -PackageId $case.Id -RepositoryUrl $case.Url
-        Test-Case "$($case.Name) normalization fails closed" { Assert-Throws { Read-PackageIdentity $path } }
+        $expected = if ($case.Name -eq 'PackageId case') { 'The package id is missing or malformed.' } else { $invalidUrl }
+        Test-Case "$($case.Name) normalization fails closed" { Assert-Throws $expected { Read-PackageIdentity $path } }
     }
 
     $repositoryCase = Join-Path $temp 'repository-slug-case.nupkg'
     New-TestPackage -Path $repositoryCase -RepositoryUrl 'https://github.com/AtyaLibraries/guards'
     Test-Case 'repository slug case normalization fails closed' {
-        Assert-Throws { Test-PackageAuthorization (Read-PackageIdentity $repositoryCase) 'AtyaLibraries/Guards' (Read-PublisherAllowlist $allowlistPath) }
+        Assert-Throws 'Package repository provenance does not match the requested repository.' { Test-PackageAuthorization (Read-PackageIdentity $repositoryCase) 'AtyaLibraries/Guards' (Read-PublisherAllowlist $allowlistPath) }
     }
 
     $missingNuspec = Join-Path $temp 'missing-nuspec.nupkg'
     $emptyArchive = [IO.Compression.ZipFile]::Open($missingNuspec, [IO.Compression.ZipArchiveMode]::Create)
     $emptyArchive.Dispose()
-    Test-Case 'missing nuspec fails' { Assert-Throws { Read-PackageIdentity $missingNuspec } }
+    Test-Case 'missing nuspec fails' { Assert-Throws 'The package must contain exactly one nuspec.' { Read-PackageIdentity $missingNuspec } }
 
     $duplicateNuspec = Join-Path $temp 'duplicate-nuspec.nupkg'
     New-TestPackage -Path $duplicateNuspec -NuspecCount 2
-    Test-Case 'duplicate nuspec fails' { Assert-Throws { Read-PackageIdentity $duplicateNuspec } }
+    Test-Case 'duplicate nuspec fails' { Assert-Throws 'The package must contain exactly one nuspec.' { Read-PackageIdentity $duplicateNuspec } }
+
+    $malformedArchive = Join-Path $temp 'malformed-archive.nupkg'
+    [IO.File]::WriteAllBytes($malformedArchive, [byte[]] (1, 2, 3, 4))
+    Test-Case 'malformed ZIP fails with sanitized reason' { Assert-Throws 'The package artifact is not a valid ZIP archive.' { Read-PackageIdentity $malformedArchive } }
 
     $malformed = Join-Path $temp 'malformed.nupkg'
     New-TestPackage -Path $malformed -MalformedXml
-    Test-Case 'malformed nuspec fails' { Assert-Throws { Read-PackageIdentity $malformed } }
+    Test-Case 'malformed nuspec fails' { Assert-Throws 'The package nuspec is not valid safe XML.' { Read-PackageIdentity $malformed } }
+
+    $foreignNamespace = Join-Path $temp 'foreign-namespace.nupkg'
+    New-TestPackage -Path $foreignNamespace -ForeignIdentityNamespace
+    Test-Case 'foreign-namespace identity elements fail' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $foreignNamespace } }
+
+    $duplicateMetadata = Join-Path $temp 'duplicate-metadata.nupkg'
+    New-TestPackage -Path $duplicateMetadata -DuplicateMetadata
+    Test-Case 'duplicate metadata elements fail' { Assert-Throws 'The package nuspec must contain exactly one metadata element.' { Read-PackageIdentity $duplicateMetadata } }
 
     $duplicateId = Join-Path $temp 'duplicate-id.nupkg'
     New-TestPackage -Path $duplicateId -DuplicateId
-    Test-Case 'duplicate package id metadata fails' { Assert-Throws { Read-PackageIdentity $duplicateId } }
+    Test-Case 'duplicate package id metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $duplicateId } }
 
     $missingId = Join-Path $temp 'missing-id.nupkg'
     New-TestPackage -Path $missingId -MissingId
-    Test-Case 'missing package id metadata fails' { Assert-Throws { Read-PackageIdentity $missingId } }
+    Test-Case 'missing package id metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $missingId } }
 
     $missingRepository = Join-Path $temp 'missing-repository.nupkg'
     New-TestPackage -Path $missingRepository -MissingRepository
-    Test-Case 'missing repository metadata fails' { Assert-Throws { Read-PackageIdentity $missingRepository } }
-    Test-Case 'package size boundary fails closed' { Assert-Throws { Read-PackageIdentity $validPackage -MaximumPackageBytes 1 } }
-    Test-Case 'package entry boundary fails closed' { Assert-Throws { Read-PackageIdentity $validPackage -MaximumEntries 0 } }
+    Test-Case 'missing repository metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $missingRepository } }
+    Test-Case 'package size boundary fails closed' { Assert-Throws 'The package artifact is missing, empty, oversized, or has an invalid extension.' { Read-PackageIdentity $validPackage -MaximumPackageBytes 1 } }
+    Test-Case 'package entry boundary fails closed' { Assert-Throws 'The package contains too many entries.' { Read-PackageIdentity $validPackage -MaximumEntries 0 } }
+    Test-Case 'nuspec size boundary fails closed' { Assert-Throws 'The package nuspec is empty or oversized.' { Read-PackageIdentity $validPackage -MaximumNuspecBytes 1 } }
 
     $badSchema = Join-Path $temp 'bad-schema.json'
     New-PolicyFile $badSchema @([ordered]@{ packageId = 'Atya.Foundation.Guards'; repository = 'Guards'; defaultBranch = 'development' }) '2.0.0'
-    Test-Case 'unsupported schema fails' { Assert-Throws { Read-PublisherAllowlist $badSchema } }
+    Test-Case 'unsupported schema fails' { Assert-Throws 'The publisher allowlist uses an unsupported policy schema or version.' { Read-PublisherAllowlist $badSchema } }
 
     $badVersion = Join-Path $temp 'bad-version.json'
     New-PolicyFile $badVersion @([ordered]@{ packageId = 'Atya.Foundation.Guards'; repository = 'Guards'; defaultBranch = 'development' }) '1.0.0' '2.0.0'
-    Test-Case 'unsupported policy major fails' { Assert-Throws { Read-PublisherAllowlist $badVersion } }
+    Test-Case 'unsupported policy major fails' { Assert-Throws 'The publisher allowlist uses an unsupported policy schema or version.' { Read-PublisherAllowlist $badVersion } }
 
     $duplicates = Join-Path $temp 'duplicates.json'
     New-PolicyFile $duplicates @(
         [ordered]@{ packageId = 'Atya.Foundation.Guards'; repository = 'Guards'; defaultBranch = 'development' },
         [ordered]@{ packageId = 'Atya.Foundation.Guards'; repository = 'Guards'; defaultBranch = 'development' }
     )
-    Test-Case 'duplicate policy ids fail' { Assert-Throws { Read-PublisherAllowlist $duplicates } }
+    Test-Case 'duplicate policy ids fail' { Assert-Throws 'The publisher allowlist contains duplicate or ambiguous package metadata.' { Read-PublisherAllowlist $duplicates } }
 
     Test-Case 'generated policy snapshot is byte-identical to recorded platform blob' {
         $actual = (& git -c "safe.directory=$($root.Replace('\', '/'))" hash-object $allowlistPath).Trim()
@@ -203,6 +257,10 @@ try {
     Test-Case 'untrusted build job has no publication authority' {
         Assert-True ($buildJob -notmatch 'id-token:\s*write|attestations:\s*write|environment:\s*production|NuGet/login|nuget push|NUGET_API_KEY') 'Build job contains publication authority.'
         Assert-True ($buildJob -match 'permissions:\s*\r?\n\s+contents:\s+read') 'Build job does not declare minimal contents permission.'
+    }
+    Test-Case 'auto-discovered source paths are canonicalized before job outputs' {
+        Assert-True ($buildJob.Contains("ConvertTo-SafeRelativePath -Path `$solution -Name 'solution'")) 'The discovered solution path is not canonicalized.'
+        Assert-True ($buildJob.Contains("ConvertTo-SafeRelativePath -Path `$packageProject -Name 'package project'")) 'The discovered package project path is not canonicalized.'
     }
     Test-Case 'privileged job never checks out or builds requested source' {
         Assert-True ($publishJob -notmatch 'build-pack-nuget|working-directory:\s*source|(?m)^\s*repository:\s*\$\{\{\s*needs\.build\.outputs\.repository') 'Publish job can check out or build requested source.'
