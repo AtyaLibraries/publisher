@@ -40,10 +40,49 @@ function Assert-Throws([string] $ExpectedMessage, [scriptblock] $Body) {
     throw 'Expected the operation to fail closed.'
 }
 
+function New-TestPortablePdbBytes([string] $SourceLinkMarker) {
+    $streams = [ordered]@{
+        '#Pdb' = [byte[]] (1, 0, 0, 0)
+        '#~' = [byte[]] (0, 0, 0, 0)
+        '#Strings' = [byte[]] (0)
+        '#GUID' = ([Guid] 'CC110556-A091-4D38-9FEC-25AB9A351A6A').ToByteArray()
+        '#Blob' = [Text.Encoding]::UTF8.GetBytes("{`"documents`":{`"*`":`"$SourceLinkMarker*`"}}")
+    }
+    $version = [Text.Encoding]::ASCII.GetBytes("PDB v1.0`0`0`0`0")
+    $headerLength = 16 + $version.Length + 4
+    foreach ($name in $streams.Keys) {
+        $nameLength = [Text.Encoding]::ASCII.GetByteCount($name) + 1
+        $headerLength += 8 + (($nameLength + 3) -band -4)
+    }
+    $total = $headerLength + (($streams.Values | ForEach-Object Length | Measure-Object -Sum).Sum)
+    $bytes = [byte[]]::new($total)
+    [BitConverter]::GetBytes([uint32] 0x424A5342).CopyTo($bytes, 0)
+    [BitConverter]::GetBytes([uint16] 1).CopyTo($bytes, 4)
+    [BitConverter]::GetBytes([uint16] 1).CopyTo($bytes, 6)
+    [BitConverter]::GetBytes([uint32] $version.Length).CopyTo($bytes, 12)
+    $version.CopyTo($bytes, 16)
+    $directory = 16 + $version.Length
+    [BitConverter]::GetBytes([uint16] $streams.Count).CopyTo($bytes, $directory + 2)
+    $cursor = $directory + 4
+    $dataOffset = $headerLength
+    foreach ($name in $streams.Keys) {
+        $data = $streams[$name]
+        [BitConverter]::GetBytes([uint32] $dataOffset).CopyTo($bytes, $cursor)
+        [BitConverter]::GetBytes([uint32] $data.Length).CopyTo($bytes, $cursor + 4)
+        $nameBytes = [Text.Encoding]::ASCII.GetBytes($name)
+        $nameBytes.CopyTo($bytes, $cursor + 8)
+        $cursor += 8 + (($nameBytes.Length + 1 + 3) -band -4)
+        $data.CopyTo($bytes, $dataOffset)
+        $dataOffset += $data.Length
+    }
+    return $bytes
+}
+
 function New-TestPackage {
     param(
         [Parameter(Mandatory)][string] $Path,
         [string] $PackageId = 'Atya.Foundation.Guards',
+        [string] $Version = '1.2.3',
         [string] $RepositoryUrl = 'https://github.com/AtyaLibraries/Guards',
         [int] $NuspecCount = 1,
         [switch] $MalformedXml,
@@ -52,7 +91,11 @@ function New-TestPackage {
         [switch] $MissingRepository,
         [switch] $DuplicateMetadata,
         [switch] $ForeignIdentityNamespace,
-        [string] $DefaultNamespace = ''
+        [string] $DefaultNamespace = '',
+        [switch] $SymbolsPackage,
+        [switch] $MalformedPortablePdb,
+        [switch] $MissingSourceLink,
+        [switch] $UnsafeArchivePath
     )
 
     $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
@@ -74,7 +117,8 @@ function New-TestPackage {
                         $defaultNamespaceAttribute = if ($DefaultNamespace) { " xmlns=`"$DefaultNamespace`"" } else { '' }
                         $id = if ($MissingId) { '' } elseif ($DuplicateId) { "<id>$escapedId</id><id>$escapedId</id>" } else { "<$($prefix)id>$escapedId</$($prefix)id>" }
                         $repository = if ($MissingRepository) { '' } else { "<$($prefix)repository type=`"git`" url=`"$escapedUrl`" />" }
-                        $metadata = "<metadata>$id<version>1.2.3</version>$repository</metadata>"
+                        $packageType = if ($SymbolsPackage) { '<packageTypes><packageType name="SymbolsPackage" /></packageTypes>' } else { '' }
+                        $metadata = "<metadata>$id<version>$Version</version>$packageType$repository</metadata>"
                         if ($DuplicateMetadata) { $metadata += $metadata }
                         $writer.Write("<?xml version=`"1.0`"?><package$defaultNamespaceAttribute$foreignNamespace>$metadata</package>")
                     }
@@ -82,6 +126,37 @@ function New-TestPackage {
                 finally { $writer.Dispose() }
             }
             finally { $stream.Dispose() }
+        }
+
+        $contentPath = if ($SymbolsPackage) { 'lib/net10.0/Atya.Foundation.Guards.pdb' } else { 'lib/net10.0/Atya.Foundation.Guards.dll' }
+        $contentEntry = $archive.CreateEntry($contentPath)
+        $contentStream = $contentEntry.Open()
+        try {
+            $content = if ($SymbolsPackage) {
+                $sourceLink = if ($MissingSourceLink) { '' } else { 'https://raw.githubusercontent.com/AtyaLibraries/Guards/0123456789012345678901234567890123456789/*' }
+                if ($MalformedPortablePdb) {
+                    [Text.Encoding]::UTF8.GetBytes("BSJB synthetic portable pdb $sourceLink")
+                }
+                else { New-TestPortablePdbBytes $sourceLink }
+            }
+            else { [byte[]] (1, 2, 3, 4) }
+            $contentStream.Write($content, 0, $content.Length)
+        }
+        finally { $contentStream.Dispose() }
+
+        if ($SymbolsPackage) {
+            $relationships = $archive.CreateEntry('_rels/.rels')
+            $relationshipsStream = $relationships.Open()
+            try {
+                $relationshipsBytes = [Text.Encoding]::UTF8.GetBytes('<Relationships />')
+                $relationshipsStream.Write($relationshipsBytes, 0, $relationshipsBytes.Length)
+            }
+            finally { $relationshipsStream.Dispose() }
+        }
+
+        if ($UnsafeArchivePath) {
+            $unsafe = $archive.CreateEntry('../unexpected.txt')
+            $unsafe.Open().Dispose()
         }
     }
     finally { $archive.Dispose() }
@@ -91,6 +166,29 @@ function New-PolicyFile([string] $Path, [object[]] $Packages, [string] $Schema =
     $json = [ordered]@{ schemaVersion = $Schema; policyVersion = $Version; packages = $Packages } |
         ConvertTo-Json -Depth 10
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
+}
+
+function New-TestSbom([string] $Path, [string] $PackageId, [string] $Version, [string] $PackagePath) {
+    $hash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $value = [ordered]@{
+        bomFormat = 'CycloneDX'
+        specVersion = '1.6'
+        version = 1
+        serialNumber = 'urn:uuid:00000000-0000-0000-0000-000000000000'
+        metadata = [ordered]@{
+            component = [ordered]@{ name = "$PackageId.$Version.nupkg"; version = "sha256:$hash" }
+        }
+        components = @()
+    }
+    [IO.File]::WriteAllText($Path, (($value | ConvertTo-Json -Depth 10) + "`n"), [Text.UTF8Encoding]::new($false))
+}
+
+function New-TestBundle([string] $Path) {
+    New-Item -ItemType Directory -Path $Path | Out-Null
+    $primary = Join-Path $Path 'package.nupkg'
+    New-TestPackage -Path $primary
+    New-TestPackage -Path (Join-Path $Path 'package.snupkg') -SymbolsPackage
+    New-TestSbom (Join-Path $Path 'package.sbom.cdx.json') 'Atya.Foundation.Guards' '1.2.3' $primary
 }
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("publisher-security-" + [Guid]::NewGuid().ToString('N'))
@@ -206,7 +304,7 @@ try {
 
     $foreignNamespace = Join-Path $temp 'foreign-namespace.nupkg'
     New-TestPackage -Path $foreignNamespace -ForeignIdentityNamespace
-    Test-Case 'foreign-namespace identity elements fail' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $foreignNamespace } }
+    Test-Case 'foreign-namespace identity elements fail' { Assert-Throws 'The package nuspec must contain exactly one id, version, and repository element.' { Read-PackageIdentity $foreignNamespace } }
 
     $duplicateMetadata = Join-Path $temp 'duplicate-metadata.nupkg'
     New-TestPackage -Path $duplicateMetadata -DuplicateMetadata
@@ -214,15 +312,15 @@ try {
 
     $duplicateId = Join-Path $temp 'duplicate-id.nupkg'
     New-TestPackage -Path $duplicateId -DuplicateId
-    Test-Case 'duplicate package id metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $duplicateId } }
+    Test-Case 'duplicate package id metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id, version, and repository element.' { Read-PackageIdentity $duplicateId } }
 
     $missingId = Join-Path $temp 'missing-id.nupkg'
     New-TestPackage -Path $missingId -MissingId
-    Test-Case 'missing package id metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $missingId } }
+    Test-Case 'missing package id metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id, version, and repository element.' { Read-PackageIdentity $missingId } }
 
     $missingRepository = Join-Path $temp 'missing-repository.nupkg'
     New-TestPackage -Path $missingRepository -MissingRepository
-    Test-Case 'missing repository metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id and repository element.' { Read-PackageIdentity $missingRepository } }
+    Test-Case 'missing repository metadata fails' { Assert-Throws 'The package nuspec must contain exactly one id, version, and repository element.' { Read-PackageIdentity $missingRepository } }
     Test-Case 'package size boundary fails closed' { Assert-Throws 'The package artifact is missing, empty, oversized, or has an invalid extension.' { Read-PackageIdentity $validPackage -MaximumPackageBytes 1 } }
     Test-Case 'package entry boundary fails closed' { Assert-Throws 'The package contains too many entries.' { Read-PackageIdentity $validPackage -MaximumEntries 0 } }
     Test-Case 'nuspec size boundary fails closed' { Assert-Throws 'The package nuspec is empty or oversized.' { Read-PackageIdentity $validPackage -MaximumNuspecBytes 1 } }
@@ -247,6 +345,180 @@ try {
         Assert-Equal 'bc4d0fbfe4e752f7db5da17ddf047a1bbb3eb4b8' $actual
     }
 
+    $validBundle = Join-Path $temp 'valid-bundle'
+    New-TestBundle $validBundle
+    Test-Case 'complete authorized release bundle validates and seals' {
+        $sealed = New-SealedReleaseBundle $validBundle 'AtyaLibraries/Guards' '1.2.3' 'refs/tags/v1.2.3' $allowlistPath
+        Assert-Equal 'Atya.Foundation.Guards' $sealed.PackageId
+        Assert-Equal '1.2.3' $sealed.Version
+        Assert-True (Test-Path -LiteralPath (Join-Path $validBundle 'release-manifest.json') -PathType Leaf) 'Release manifest was not generated.'
+        Assert-True (Test-SealedReleaseBundle $validBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.PolicyVersion) 'Sealed bundle verification failed.'
+    }
+
+    $missingSymbolBundle = Join-Path $temp 'missing-symbol-bundle'
+    New-TestBundle $missingSymbolBundle
+    Remove-Item -LiteralPath (Join-Path $missingSymbolBundle 'package.snupkg')
+    Test-Case 'missing required symbol package fails' {
+        Assert-Throws 'The release bundle must contain exactly one symbol package.' { New-SealedReleaseBundle $missingSymbolBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $duplicatePrimaryBundle = Join-Path $temp 'duplicate-primary-bundle'
+    New-TestBundle $duplicatePrimaryBundle
+    Copy-Item -LiteralPath (Join-Path $duplicatePrimaryBundle 'package.nupkg') -Destination (Join-Path $duplicatePrimaryBundle 'duplicate.nupkg')
+    Test-Case 'duplicate primary package fails' {
+        Assert-Throws 'The release bundle must contain exactly one primary package.' { New-SealedReleaseBundle $duplicatePrimaryBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $duplicateSymbolBundle = Join-Path $temp 'duplicate-symbol-bundle'
+    New-TestBundle $duplicateSymbolBundle
+    Copy-Item -LiteralPath (Join-Path $duplicateSymbolBundle 'package.snupkg') -Destination (Join-Path $duplicateSymbolBundle 'duplicate.snupkg')
+    Test-Case 'duplicate symbol package fails' {
+        Assert-Throws 'The release bundle must contain exactly one symbol package.' { New-SealedReleaseBundle $duplicateSymbolBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    foreach ($mismatch in @(
+        @{ Name = 'PackageId'; PackageId = 'Atya.Foundation.Results'; Version = '1.2.3'; Repository = 'https://github.com/AtyaLibraries/Guards' },
+        @{ Name = 'version'; PackageId = 'Atya.Foundation.Guards'; Version = '1.2.4'; Repository = 'https://github.com/AtyaLibraries/Guards' },
+        @{ Name = 'repository provenance'; PackageId = 'Atya.Foundation.Guards'; Version = '1.2.3'; Repository = 'https://github.com/AtyaLibraries/Results' }
+    )) {
+        $bundle = Join-Path $temp ("mismatched-" + ($mismatch.Name -replace ' ', '-') + '-bundle')
+        New-TestBundle $bundle
+        Remove-Item -LiteralPath (Join-Path $bundle 'package.snupkg')
+        New-TestPackage -Path (Join-Path $bundle 'package.snupkg') -SymbolsPackage -PackageId $mismatch.PackageId -Version $mismatch.Version -RepositoryUrl $mismatch.Repository
+        Test-Case "mismatched $($mismatch.Name) across package pair fails" {
+            Assert-Throws 'The primary and symbol package identities do not agree.' { New-SealedReleaseBundle $bundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+        }
+    }
+
+    $requestedVersionBundle = Join-Path $temp 'requested-version-bundle'
+    New-TestBundle $requestedVersionBundle
+    Test-Case 'package and requested tag version mismatch fails' {
+        Assert-Throws 'The requested tag and version do not agree.' { New-SealedReleaseBundle $requestedVersionBundle 'AtyaLibraries/Guards' '1.2.4' 'v1.2.3' $allowlistPath }
+    }
+
+    $badSbomBundle = Join-Path $temp 'bad-sbom-bundle'
+    New-TestBundle $badSbomBundle
+    New-TestSbom (Join-Path $badSbomBundle 'package.sbom.cdx.json') 'Atya.Foundation.Results' '1.2.3' (Join-Path $badSbomBundle 'package.nupkg')
+    Test-Case 'SBOM package identity mismatch fails' {
+        Assert-Throws 'The package SBOM does not identify the validated primary package.' { New-SealedReleaseBundle $badSbomBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $badSbomVersionBundle = Join-Path $temp 'bad-sbom-version-bundle'
+    New-TestBundle $badSbomVersionBundle
+    $sbomPath = Join-Path $badSbomVersionBundle 'package.sbom.cdx.json'
+    [IO.File]::WriteAllText($sbomPath, ([regex]::Replace([IO.File]::ReadAllText($sbomPath), '"specVersion"\s*:\s*"1\.6"', '"specVersion": "2.0"')), [Text.UTF8Encoding]::new($false))
+    Test-Case 'unsupported SBOM version fails' {
+        Assert-Throws 'The package SBOM uses an unsupported or ambiguous format version.' { New-SealedReleaseBundle $badSbomVersionBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $malformedSbomBundle = Join-Path $temp 'malformed-sbom-bundle'
+    New-TestBundle $malformedSbomBundle
+    [IO.File]::WriteAllText((Join-Path $malformedSbomBundle 'package.sbom.cdx.json'), '{not-json', [Text.UTF8Encoding]::new($false))
+    Test-Case 'malformed SBOM JSON fails with sanitized reason' {
+        Assert-Throws 'The package SBOM is not valid JSON.' { New-SealedReleaseBundle $malformedSbomBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $missingSbomMetadataBundle = Join-Path $temp 'missing-sbom-metadata-bundle'
+    New-TestBundle $missingSbomMetadataBundle
+    [IO.File]::WriteAllText((Join-Path $missingSbomMetadataBundle 'package.sbom.cdx.json'), '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1}', [Text.UTF8Encoding]::new($false))
+    Test-Case 'missing SBOM identity metadata fails with sanitized reason' {
+        Assert-Throws 'The package SBOM is missing required identity metadata.' { New-SealedReleaseBundle $missingSbomMetadataBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $unexpectedBundle = Join-Path $temp 'unexpected-bundle'
+    New-TestBundle $unexpectedBundle
+    [IO.File]::WriteAllText((Join-Path $unexpectedBundle 'unexpected.txt'), 'unexpected')
+    Test-Case 'unexpected bundle file fails' {
+        Assert-Throws 'The release bundle contains an unexpected artifact.' { New-SealedReleaseBundle $unexpectedBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $unsafePathBundle = Join-Path $temp 'unsafe-path-bundle'
+    New-TestBundle $unsafePathBundle
+    New-Item -ItemType Directory -Path (Join-Path $unsafePathBundle 'nested') | Out-Null
+    Test-Case 'nested bundle path fails' {
+        Assert-Throws 'The release bundle contains an unsafe path or nested directory.' { New-SealedReleaseBundle $unsafePathBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $zeroLengthBundle = Join-Path $temp 'zero-length-bundle'
+    New-TestBundle $zeroLengthBundle
+    [IO.File]::WriteAllBytes((Join-Path $zeroLengthBundle 'package.sbom.cdx.json'), [byte[]] @())
+    Test-Case 'zero-length required artifact fails' {
+        Assert-Throws 'A required release artifact is empty or oversized.' { New-SealedReleaseBundle $zeroLengthBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $boundedBundle = Join-Path $temp 'bounded-bundle'
+    New-TestBundle $boundedBundle
+    Test-Case 'per-file bundle size boundary fails' {
+        Assert-Throws 'A required release artifact is empty or oversized.' { New-SealedReleaseBundle $boundedBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath -MaximumSbomBytes 1 }
+    }
+    Test-Case 'aggregate bundle size boundary fails' {
+        Assert-Throws 'The release bundle exceeds the aggregate size boundary.' { New-SealedReleaseBundle $boundedBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath -MaximumAggregateBytes 1 }
+    }
+
+    $unsafeArchiveBundle = Join-Path $temp 'unsafe-archive-bundle'
+    New-TestBundle $unsafeArchiveBundle
+    Remove-Item -LiteralPath (Join-Path $unsafeArchiveBundle 'package.nupkg')
+    New-TestPackage -Path (Join-Path $unsafeArchiveBundle 'package.nupkg') -UnsafeArchivePath
+    New-TestSbom (Join-Path $unsafeArchiveBundle 'package.sbom.cdx.json') 'Atya.Foundation.Guards' '1.2.3' (Join-Path $unsafeArchiveBundle 'package.nupkg')
+    Test-Case 'unsafe package archive path fails' {
+        Assert-Throws 'The package contains an unsafe or ambiguous archive entry.' { New-SealedReleaseBundle $unsafeArchiveBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    foreach ($pdbCase in @(
+        @{ Name = 'malformed Portable PDB'; Malformed = $true; MissingSourceLink = $false },
+        @{ Name = 'missing SourceLink'; Malformed = $false; MissingSourceLink = $true }
+    )) {
+        $bundle = Join-Path $temp (($pdbCase.Name -replace ' ', '-') + '-bundle')
+        New-TestBundle $bundle
+        Remove-Item -LiteralPath (Join-Path $bundle 'package.snupkg')
+        New-TestPackage -Path (Join-Path $bundle 'package.snupkg') -SymbolsPackage -MalformedPortablePdb:$pdbCase.Malformed -MissingSourceLink:$pdbCase.MissingSourceLink
+        Test-Case "$($pdbCase.Name) fails" {
+            Assert-Throws 'The symbol package does not contain portable SourceLink-bound PDBs.' { New-SealedReleaseBundle $bundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+        }
+    }
+
+    $missingSymbolTypeBundle = Join-Path $temp 'missing-symbol-type-bundle'
+    New-TestBundle $missingSymbolTypeBundle
+    Remove-Item -LiteralPath (Join-Path $missingSymbolTypeBundle 'package.snupkg')
+    New-TestPackage -Path (Join-Path $missingSymbolTypeBundle 'package.snupkg')
+    Test-Case 'missing SymbolsPackage type fails' {
+        Assert-Throws 'The symbol package does not declare exactly one SymbolsPackage type.' { New-SealedReleaseBundle $missingSymbolTypeBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath }
+    }
+
+    $hashTamperBundle = Join-Path $temp 'hash-tamper-bundle'
+    New-TestBundle $hashTamperBundle
+    $sealed = New-SealedReleaseBundle $hashTamperBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath
+    [IO.File]::AppendAllText((Join-Path $hashTamperBundle 'package.nupkg'), 'tamper')
+    Test-Case 'artifact hash mismatch after sealing fails' {
+        Assert-Throws 'A sealed artifact hash or length does not match the release manifest.' { Test-SealedReleaseBundle $hashTamperBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.PolicyVersion }
+    }
+
+    $manifestTamperBundle = Join-Path $temp 'manifest-tamper-bundle'
+    New-TestBundle $manifestTamperBundle
+    $sealed = New-SealedReleaseBundle $manifestTamperBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath
+    $manifestPath = Join-Path $manifestTamperBundle 'release-manifest.json'
+    [IO.File]::WriteAllText($manifestPath, ([IO.File]::ReadAllText($manifestPath).Replace('Atya.Foundation.Guards', 'Atya.Foundation.Results')), [Text.UTF8Encoding]::new($false))
+    Test-Case 'release manifest identity tampering fails' {
+        Assert-Throws 'The release manifest identity does not match the authorized release.' { Test-SealedReleaseBundle $manifestTamperBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.PolicyVersion }
+    }
+
+    $manifestVersionBundle = Join-Path $temp 'manifest-version-bundle'
+    New-TestBundle $manifestVersionBundle
+    $sealed = New-SealedReleaseBundle $manifestVersionBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath
+    $manifestPath = Join-Path $manifestVersionBundle 'release-manifest.json'
+    [IO.File]::WriteAllText($manifestPath, ([IO.File]::ReadAllText($manifestPath).Replace('"schemaVersion": "1.0.0"', '"schemaVersion": "2.0.0"')), [Text.UTF8Encoding]::new($false))
+    Test-Case 'unsupported release manifest schema fails' {
+        Assert-Throws 'The release manifest uses an unsupported schema version.' { Test-SealedReleaseBundle $manifestVersionBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.PolicyVersion }
+    }
+
+    $malformedManifestBundle = Join-Path $temp 'malformed-manifest-bundle'
+    New-TestBundle $malformedManifestBundle
+    $sealed = New-SealedReleaseBundle $malformedManifestBundle 'AtyaLibraries/Guards' '1.2.3' 'v1.2.3' $allowlistPath
+    [IO.File]::WriteAllText((Join-Path $malformedManifestBundle 'release-manifest.json'), '{not-json', [Text.UTF8Encoding]::new($false))
+    Test-Case 'malformed release manifest fails with sanitized reason' {
+        Assert-Throws 'The release manifest is not valid JSON.' { Test-SealedReleaseBundle $malformedManifestBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.PolicyVersion }
+    }
+
     $workflow = (Get-Content -LiteralPath (Join-Path $root '.github/workflows/publish.yml') -Raw) -replace "`r`n", "`n"
     $buildStart = $workflow.IndexOf("  build:`n", [StringComparison]::Ordinal)
     $publishStart = $workflow.IndexOf("  publish:`n", [StringComparison]::Ordinal)
@@ -266,11 +538,20 @@ try {
         Assert-True ($publishJob -notmatch 'build-pack-nuget|working-directory:\s*source|(?m)^\s*repository:\s*\$\{\{\s*needs\.build\.outputs\.repository') 'Publish job can check out or build requested source.'
         Assert-True ($publishJob -match 'repository:\s*AtyaLibraries/publisher') 'Publish job does not use trusted publisher controls.'
     }
-    Test-Case 'authorization precedes credential and push steps' {
-        $authorize = $publishJob.IndexOf('Validate package identity and authorization', [StringComparison]::Ordinal)
+    Test-Case 'complete sealed bundle is retained and attested before credentials and push' {
+        $authorize = $publishJob.IndexOf('Validate, complete, and seal release bundle', [StringComparison]::Ordinal)
+        $retain = $publishJob.IndexOf('Retain complete sealed release bundle', [StringComparison]::Ordinal)
+        $attest = $publishJob.IndexOf('Attest complete sealed release bundle', [StringComparison]::Ordinal)
+        $verify = $publishJob.IndexOf('Verify attested bytes before credential acquisition', [StringComparison]::Ordinal)
         $login = $publishJob.IndexOf('Log in to NuGet.org', [StringComparison]::Ordinal)
         $push = $publishJob.IndexOf('Push package', [StringComparison]::Ordinal)
-        Assert-True ($authorize -ge 0 -and $authorize -lt $login -and $login -lt $push) 'Credential acquisition is not ordered after authorization.'
+        Assert-True ($authorize -ge 0 -and $authorize -lt $retain -and $retain -lt $attest -and $attest -lt $verify -and $verify -lt $login -and $login -lt $push) 'The release bundle is not sealed, retained, attested, and verified before credential acquisition.'
+    }
+    Test-Case 'push step re-verifies the sealed bundle immediately before publication' {
+        $pushStep = $publishJob.Substring($publishJob.IndexOf('Push package', [StringComparison]::Ordinal))
+        $verify = $pushStep.IndexOf('Verify-SealedReleaseBundle.ps1', [StringComparison]::Ordinal)
+        $publish = $pushStep.IndexOf('dotnet nuget push ./inbound/package.nupkg', [StringComparison]::Ordinal)
+        Assert-True ($verify -ge 0 -and $verify -lt $publish) 'The attested release bundle is not re-verified immediately before publication.'
     }
     Test-Case 'workflow actions use immutable SHA references' {
         $uses = [regex]::Matches($workflow, '(?m)^\s*uses:\s*[^\s]+@([^\s]+)')
@@ -279,11 +560,13 @@ try {
             Assert-True ($use.Groups[1].Value -cmatch '^[0-9a-f]{40}$') "Mutable action reference found: $($use.Value)"
         }
     }
-    Test-Case 'workflow carries only one bounded package artifact' {
-        Assert-True ($workflow -match 'path:\s*package-artifact/package\.nupkg') 'Artifact upload is not an exact package path.'
+    Test-Case 'workflow carries one bounded and complete release bundle' {
+        Assert-True ($workflow -match 'release-bundle/package\.nupkg' -and $workflow -match 'release-bundle/package\.snupkg' -and $workflow -match 'release-bundle/package\.sbom\.cdx\.json') 'The inbound artifact does not contain the exact required release files.'
         Assert-True ($workflow -match '\$packages\.Count -ne 1') 'Ambiguous package output check is missing.'
-        Assert-True ($workflow -match '268435456') 'Package size boundary is missing.'
-        Assert-True ($workflow -match 'retention-days:\s*1') 'Artifact retention is not bounded.'
+        Assert-True ($workflow -match '\$symbolPackages\.Count -ne 1' -and $workflow -match '\$sboms\.Count -ne 1') 'Complete bundle cardinality checks are missing.'
+        Assert-True ($workflow -match '268435456' -and $workflow -match '8388608' -and $workflow -match '545259520') 'Release bundle size boundaries are missing.'
+        Assert-True ($workflow -match 'retention-days:\s*1' -and $workflow -match 'retention-days:\s*90') 'Inbound or sealed artifact retention is not bounded.'
+        Assert-True ($publishJob -match 'inbound/release-manifest\.json') 'The deterministic release manifest is not retained and attested.'
     }
 }
 finally {
