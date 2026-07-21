@@ -27,16 +27,18 @@ on:
         default: global.json
         type: string
 
-permissions:
-  id-token: write
-  attestations: write
-  contents: read
+permissions: {}
 
 jobs:
-  publish:
-    name: Publish NuGet package
+  build:
+    name: Build untrusted package source
     runs-on: ubuntu-latest
-    environment: production
+    permissions:
+      contents: read
+    outputs:
+      repository: ${{ steps.request.outputs.repository }}
+      ref: ${{ steps.request.outputs.ref }}
+      version: ${{ steps.request.outputs.version }}
     env:
       SOURCE_REPOSITORY: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
       SOURCE_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
@@ -45,175 +47,165 @@ jobs:
       SOURCE_GLOBAL_JSON: ${{ github.event.client_payload['global-json'] || github.event.client_payload.global_json || github.event.inputs.global_json || 'global.json' }}
 
     steps:
+      - name: Checkout trusted publisher controls
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: AtyaLibraries/publisher
+          ref: ${{ github.workflow_sha }}
+          path: trusted-publisher
+          persist-credentials: false
+
       - name: Validate publish request
-        shell: bash
-        run: |
-          test -n "$SOURCE_REPOSITORY"
-          test -n "$SOURCE_REF"
-
-          case "$SOURCE_REPOSITORY" in
-            AtyaLibraries/*) ;;
-            *)
-              echo "::error::Refusing non-AtyaLibraries repository '$SOURCE_REPOSITORY'."
-              exit 1
-              ;;
-          esac
-
-          case "$SOURCE_REF" in
-            v*|refs/tags/v*) ;;
-            *)
-              echo "::error::Refusing non-release ref '$SOURCE_REF'."
-              exit 1
-              ;;
-          esac
+        id: request
+        shell: pwsh
+        run: >-
+          ./trusted-publisher/scripts/Validate-PublishRequest.ps1
+          -Repository $env:SOURCE_REPOSITORY
+          -Ref $env:SOURCE_REF
+          -Solution $env:SOURCE_SOLUTION
+          -PackageProject $env:SOURCE_PACKAGE_PROJECT
+          -GlobalJson $env:SOURCE_GLOBAL_JSON
 
       - name: Checkout package source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: ${{ env.SOURCE_REPOSITORY }}
-          ref: ${{ env.SOURCE_REF }}
+          repository: ${{ steps.request.outputs.repository }}
+          ref: ${{ steps.request.outputs.ref }}
           fetch-depth: 0
-          # Public package repos work with the default token. If a private package
-          # repo becomes a target, add a checkout token input at that time.
+          path: source
+          persist-credentials: false
+
+      - name: Verify immutable release ref
+        working-directory: source
+        shell: bash
+        env:
+          RELEASE_REF: ${{ steps.request.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git show-ref --verify --quiet "$RELEASE_REF" || {
+            echo '::error::The requested release tag was not fetched.'
+            exit 1
+          }
+          test "$(git rev-list -n 1 "$RELEASE_REF")" = "$(git rev-parse HEAD)" || {
+            echo '::error::The checked-out commit does not match the requested release tag.'
+            exit 1
+          }
 
       - name: Setup .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
-          global-json-file: ${{ env.SOURCE_GLOBAL_JSON }}
+          global-json-file: source/${{ steps.request.outputs.global_json }}
 
       - name: Locate package inputs
         id: package_inputs
+        working-directory: source
         shell: pwsh
+        env:
+          REQUEST_SOLUTION: ${{ steps.request.outputs.solution }}
+          REQUEST_PACKAGE_PROJECT: ${{ steps.request.outputs.package_project }}
         run: |
-          $solution = $env:SOURCE_SOLUTION
-
+          $ErrorActionPreference = 'Stop'
+          Import-Module ../trusted-publisher/scripts/PublisherSecurity.psm1 -Force
+          $solution = $env:REQUEST_SOLUTION
           if ([string]::IsNullOrWhiteSpace($solution)) {
             $solutions = @(Get-ChildItem -LiteralPath . -Filter *.sln -File)
-
             if ($solutions.Count -ne 1) {
-              throw "Expected exactly one solution file, found $($solutions.Count)."
+              throw "Expected exactly one solution file; found $($solutions.Count)."
             }
-
-            $solution = "./$($solutions[0].Name)"
+            $solution = $solutions[0].Name
           }
 
-          $packageProject = $env:SOURCE_PACKAGE_PROJECT
-
+          $packageProject = $env:REQUEST_PACKAGE_PROJECT
           if ([string]::IsNullOrWhiteSpace($packageProject)) {
-            $srcPath = Join-Path (Get-Location) 'src'
-
-            if (-not (Test-Path -LiteralPath $srcPath)) {
-              throw "Expected a src directory containing one package project."
+            if (-not (Test-Path -LiteralPath src -PathType Container)) {
+              throw 'Expected a src directory containing one package project.'
             }
-
-            $packageProjects = @(Get-ChildItem -LiteralPath $srcPath -Recurse -Filter *.csproj -File)
-
+            $packageProjects = @(Get-ChildItem -LiteralPath src -Recurse -Filter *.csproj -File)
             if ($packageProjects.Count -ne 1) {
-              throw "Expected exactly one package project under src, found $($packageProjects.Count)."
+              throw "Expected exactly one package project under src; found $($packageProjects.Count)."
             }
-
-            $packageProject = (Resolve-Path -Relative -Path $packageProjects[0].FullName).Replace('\', '/')
+            $packageProject = (Resolve-Path -Relative -LiteralPath $packageProjects[0].FullName).Replace('\', '/').TrimStart('./')
           }
 
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "solution=$solution"
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "package_project=$packageProject"
+          $solution = ConvertTo-SafeRelativePath -Path $solution -Name 'solution'
+          $packageProject = ConvertTo-SafeRelativePath -Path $packageProject -Name 'package project'
 
-      - name: Determine package version
-        shell: bash
-        run: |
-          package_version=""
-
-          case "$SOURCE_REF" in
-            refs/tags/v*)
-              package_version="${SOURCE_REF#refs/tags/v}"
-              ;;
-            v*)
-              package_version="${SOURCE_REF#v}"
-              ;;
-          esac
-
-          if [ -n "$package_version" ]; then
-            if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
-              echo "::error::Source ref '$SOURCE_REF' does not contain a SemVer package version."
-              exit 1
-            fi
-
-            {
-              echo "PACKAGE_VERSION=$package_version"
-              echo "MINVERVERSIONOVERRIDE=$package_version"
-            } >> "$GITHUB_ENV"
-          fi
+          if (-not (Test-Path -LiteralPath $solution -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $packageProject -PathType Leaf)) {
+            throw 'A requested package input does not exist in the source checkout.'
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "solution=$solution"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "package_project=$packageProject"
 
       - name: Build and pack
         uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@12bd0f142d443058477bcb167bad4b4f063de994
         with:
-          solution: ${{ steps.package_inputs.outputs.solution }}
-          package-project: ${{ steps.package_inputs.outputs.package_project }}
+          solution: source/${{ steps.package_inputs.outputs.solution }}
+          package-project: source/${{ steps.package_inputs.outputs.package_project }}
+        env:
+          PACKAGE_VERSION: ${{ steps.request.outputs.version }}
+          MINVERVERSIONOVERRIDE: ${{ steps.request.outputs.version }}
 
-      - name: Locate package
+      - name: Stage bounded package artifact
         id: package
-        shell: bash
-        run: |
-          mapfile -t packages < <(find . -type f -name '*.nupkg' ! -name '*.symbols.nupkg' | sort)
-
-          if [ "${#packages[@]}" -ne 1 ]; then
-            printf 'Expected exactly one package, found %s:\n' "${#packages[@]}"
-            printf '%s\n' "${packages[@]}"
-            exit 1
-          fi
-
-          echo "path=${packages[0]}" >> "$GITHUB_OUTPUT"
-
-      - name: Validate package repository metadata
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-          $packagePath = $env:PACKAGE_PATH
-          $expected = $env:EXPECTED_REPOSITORY_URL.TrimEnd('/')
-
-          $package = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
-          try {
-            $nuspecEntries = @($package.Entries | Where-Object { $_.FullName.EndsWith('.nuspec', [StringComparison]::OrdinalIgnoreCase) })
-
-            if ($nuspecEntries.Count -ne 1) {
-              throw "Expected exactly one nuspec in '$packagePath', found $($nuspecEntries.Count)."
-            }
-
-            $stream = $nuspecEntries[0].Open()
-            try {
-              $reader = New-Object System.IO.StreamReader($stream)
-              try {
-                [xml]$nuspec = $reader.ReadToEnd()
-              }
-              finally {
-                $reader.Dispose()
-              }
-            }
-            finally {
-              $stream.Dispose()
-            }
-
-            $actual = [string]$nuspec.package.metadata.repository.url
-            $actual = $actual.TrimEnd('/')
-
-            if ($actual.EndsWith('.git', [StringComparison]::OrdinalIgnoreCase)) {
-              $actual = $actual.Substring(0, $actual.Length - 4)
-            }
-
-            if ($actual -ne $expected) {
-              throw "Package repository URL '$actual' does not match source repository '$expected'."
-            }
-
-            Write-Output "Package repository URL verified: $actual"
+          $packages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.nupkg -File |
+            Where-Object { -not $_.Name.EndsWith('.symbols.nupkg', [StringComparison]::OrdinalIgnoreCase) })
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one package artifact; found $($packages.Count)."
           }
-          finally {
-            $package.Dispose()
+          if ($packages[0].Length -le 0 -or $packages[0].Length -gt 268435456) {
+            throw 'The package artifact is empty or exceeds the publication boundary limit.'
           }
+          New-Item -ItemType Directory -Path package-artifact | Out-Null
+          Copy-Item -LiteralPath $packages[0].FullName -Destination package-artifact/package.nupkg
+
+      - name: Upload bounded package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: package-artifact/package.nupkg
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+
+  publish:
+    name: Validate and publish trusted artifact
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout trusted publisher controls
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: AtyaLibraries/publisher
+          ref: ${{ github.workflow_sha }}
+          path: trusted-publisher
+          persist-credentials: false
+
+      - name: Download bounded package artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: inbound
+
+      - name: Validate package identity and authorization
+        id: authorization
+        shell: pwsh
         env:
-          PACKAGE_PATH: ${{ steps.package.outputs.path }}
-          EXPECTED_REPOSITORY_URL: https://github.com/${{ env.SOURCE_REPOSITORY }}
+          REQUESTED_REPOSITORY: ${{ needs.build.outputs.repository }}
+        run: >-
+          ./trusted-publisher/scripts/Validate-PackageAuthorization.ps1
+          -PackagePath ./inbound/package.nupkg
+          -RequestedRepository $env:REQUESTED_REPOSITORY
+          -AllowlistPath ./trusted-publisher/policy/publisher-allowlist.json
 
       - name: Log in to NuGet.org
         id: login
@@ -224,11 +216,11 @@ jobs:
       - name: Push package
         shell: bash
         run: |
-          dotnet nuget push "${{ steps.package.outputs.path }}" \
+          dotnet nuget push ./inbound/package.nupkg \
             --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json
 
       - name: Attest package provenance
         uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
         with:
-          subject-path: ${{ steps.package.outputs.path }}
+          subject-path: ./inbound/package.nupkg
