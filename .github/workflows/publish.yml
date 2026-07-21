@@ -39,6 +39,7 @@ jobs:
       repository: ${{ steps.request.outputs.repository }}
       ref: ${{ steps.request.outputs.ref }}
       version: ${{ steps.request.outputs.version }}
+      commit: ${{ steps.release_commit.outputs.commit }}
     env:
       SOURCE_REPOSITORY: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
       SOURCE_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
@@ -76,6 +77,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify immutable release ref
+        id: release_commit
         working-directory: source
         shell: bash
         env:
@@ -86,10 +88,16 @@ jobs:
             echo '::error::The requested release tag was not fetched.'
             exit 1
           }
-          test "$(git rev-list -n 1 "$RELEASE_REF")" = "$(git rev-parse HEAD)" || {
+          commit="$(git rev-list -n 1 "$RELEASE_REF")"
+          test "$commit" = "$(git rev-parse HEAD)" || {
             echo '::error::The checked-out commit does not match the requested release tag.'
             exit 1
           }
+          test "${#commit}" -eq 40 || {
+            echo '::error::The requested release commit is malformed.'
+            exit 1
+          }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
       - name: Setup .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
@@ -146,27 +154,44 @@ jobs:
           PACKAGE_VERSION: ${{ steps.request.outputs.version }}
           MINVERVERSIONOVERRIDE: ${{ steps.request.outputs.version }}
 
-      - name: Stage bounded package artifact
-        id: package
+      - name: Stage bounded release bundle
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $packages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.nupkg -File |
             Where-Object { -not $_.Name.EndsWith('.symbols.nupkg', [StringComparison]::OrdinalIgnoreCase) })
+          $symbolPackages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.snupkg -File)
+          $sboms = @(Get-ChildItem -LiteralPath artifacts/packages -Filter package.sbom.cdx.json -File)
           if ($packages.Count -ne 1) {
             throw "Expected exactly one package artifact; found $($packages.Count)."
           }
-          if ($packages[0].Length -le 0 -or $packages[0].Length -gt 268435456) {
-            throw 'The package artifact is empty or exceeds the publication boundary limit.'
+          if ($symbolPackages.Count -ne 1) {
+            throw "Expected exactly one symbol package artifact; found $($symbolPackages.Count)."
           }
-          New-Item -ItemType Directory -Path package-artifact | Out-Null
-          Copy-Item -LiteralPath $packages[0].FullName -Destination package-artifact/package.nupkg
+          if ($sboms.Count -ne 1) {
+            throw "Expected exactly one package SBOM artifact; found $($sboms.Count)."
+          }
+          $files = @($packages[0], $symbolPackages[0], $sboms[0])
+          if (@($files | Where-Object {
+              $_.Length -le 0 -or ($_.Extension -in @('.nupkg', '.snupkg') -and $_.Length -gt 268435456) -or
+              ($_.Name -ceq 'package.sbom.cdx.json' -and $_.Length -gt 8388608) -or
+              ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            }).Count -ne 0 -or ($files | Measure-Object Length -Sum).Sum -gt 545259520) {
+            throw 'The release bundle is empty, unsafe, or exceeds a publication boundary.'
+          }
+          New-Item -ItemType Directory -Path release-bundle | Out-Null
+          Copy-Item -LiteralPath $packages[0].FullName -Destination release-bundle/package.nupkg
+          Copy-Item -LiteralPath $symbolPackages[0].FullName -Destination release-bundle/package.snupkg
+          Copy-Item -LiteralPath $sboms[0].FullName -Destination release-bundle/package.sbom.cdx.json
 
-      - name: Upload bounded package artifact
+      - name: Upload bounded release bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: package-${{ github.run_id }}-${{ github.run_attempt }}
-          path: package-artifact/package.nupkg
+          name: release-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release-bundle/package.nupkg
+            release-bundle/package.snupkg
+            release-bundle/package.sbom.cdx.json
           if-no-files-found: error
           include-hidden-files: false
           retention-days: 1
@@ -190,22 +215,67 @@ jobs:
           path: trusted-publisher
           persist-credentials: false
 
-      - name: Download bounded package artifact
+      - name: Setup pinned publication CLI
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.301
+
+      - name: Download bounded release bundle
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: package-${{ github.run_id }}-${{ github.run_attempt }}
+          name: release-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: inbound
 
-      - name: Validate package identity and authorization
-        id: authorization
+      - name: Validate, complete, and seal release bundle
+        id: release
         shell: pwsh
         env:
           REQUESTED_REPOSITORY: ${{ needs.build.outputs.repository }}
+          REQUESTED_REF: ${{ needs.build.outputs.ref }}
+          REQUESTED_VERSION: ${{ needs.build.outputs.version }}
+          REQUESTED_COMMIT: ${{ needs.build.outputs.commit }}
         run: >-
-          ./trusted-publisher/scripts/Validate-PackageAuthorization.ps1
-          -PackagePath ./inbound/package.nupkg
+          ./trusted-publisher/scripts/Seal-ReleaseBundle.ps1
+          -BundlePath ./inbound
           -RequestedRepository $env:REQUESTED_REPOSITORY
+          -RequestedVersion $env:REQUESTED_VERSION
+          -RequestedRef $env:REQUESTED_REF
+          -RequestedCommit $env:REQUESTED_COMMIT
           -AllowlistPath ./trusted-publisher/policy/publisher-allowlist.json
+
+      - name: Retain complete sealed release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sealed-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            inbound/package.nupkg
+            inbound/package.snupkg
+            inbound/package.sbom.cdx.json
+            inbound/release-manifest.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 90
+
+      - name: Attest complete sealed release bundle
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            ./inbound/package.nupkg
+            ./inbound/package.snupkg
+            ./inbound/package.sbom.cdx.json
+            ./inbound/release-manifest.json
+
+      - name: Verify attested bytes before credential acquisition
+        shell: pwsh
+        run: >-
+          ./trusted-publisher/scripts/Verify-SealedReleaseBundle.ps1
+          -BundlePath ./inbound
+          -ExpectedPackageId '${{ steps.release.outputs.package_id }}'
+          -ExpectedVersion '${{ steps.release.outputs.version }}'
+          -ExpectedRepository '${{ steps.release.outputs.repository }}'
+          -ExpectedRef '${{ steps.release.outputs.ref }}'
+          -ExpectedCommit '${{ steps.release.outputs.commit }}'
+          -ExpectedPolicyVersion '${{ steps.release.outputs.policy_version }}'
 
       - name: Log in to NuGet.org
         id: login
@@ -214,13 +284,20 @@ jobs:
           user: ArsenAsulyan
 
       - name: Push package
-        shell: bash
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
-          dotnet nuget push ./inbound/package.nupkg \
-            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+          $ErrorActionPreference = 'Stop'
+          ./trusted-publisher/scripts/Verify-SealedReleaseBundle.ps1 `
+            -BundlePath ./inbound `
+            -ExpectedPackageId '${{ steps.release.outputs.package_id }}' `
+            -ExpectedVersion '${{ steps.release.outputs.version }}' `
+            -ExpectedRepository '${{ steps.release.outputs.repository }}' `
+            -ExpectedRef '${{ steps.release.outputs.ref }}' `
+            -ExpectedCommit '${{ steps.release.outputs.commit }}' `
+            -ExpectedPolicyVersion '${{ steps.release.outputs.policy_version }}'
+          dotnet nuget push ./inbound/package.nupkg `
+            --api-key $env:NUGET_API_KEY `
             --source https://api.nuget.org/v3/index.json
-
-      - name: Attest package provenance
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
-        with:
-          subject-path: ./inbound/package.nupkg
+          if ($LASTEXITCODE -ne 0) { throw 'NuGet publication did not complete successfully.' }
