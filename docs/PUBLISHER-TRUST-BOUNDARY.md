@@ -25,14 +25,15 @@ Before `NuGet/login` runs, the job:
 
 - validates the exact canonical repository, immutable SemVer tag, and requested
   version;
-- derives matching package id, version, and repository provenance independently
-  from both `.nupkg` and `.snupkg` metadata;
+- derives matching package id, version, repository provenance, and exact source
+  commit independently from both `.nupkg` and `.snupkg` metadata;
 - requires a `SymbolsPackage` `.snupkg` whose portable PDB paths correspond to the
-  primary assemblies and whose SourceLink data binds to the requested repository;
+  primary assemblies and whose Portable PDB SourceLink record binds every mapping
+  to the requested repository and exact commit resolved from the immutable tag;
 - verifies the CycloneDX 1.6 SBOM identifies the primary package and its SHA-256;
 - authorizes the derived PackageId-to-repository pair against the immutable policy;
 - creates a deterministic manifest containing the authorized identity, source ref,
-  policy version, lengths, and SHA-256 for all three inputs;
+  exact source commit, policy version, lengths, and SHA-256 for all three inputs;
 - verifies the resulting four-file sealed bundle, retains it for 90 days, attests
   all four exact files, and verifies the same bytes again.
 
@@ -40,6 +41,13 @@ The push step re-verifies the sealed bundle immediately before invoking NuGet. A
 failure anywhere before login makes credential acquisition and publication
 unreachable. See [RELEASE-ARTIFACT-CONTRACT.md](RELEASE-ARTIFACT-CONTRACT.md) for
 the exact contract and recovery procedure.
+
+The privileged job installs the exact .NET SDK `10.0.301` before publication, so
+the NuGet client behavior is not inherited from a mutable runner image. Build
+provenance uses `actions/attest-build-provenance` v2.4.0 at immutable commit
+`e8998f949152b193b063cb0ec769d69d929409be`; that action delegates one explicit
+four-subject list to `actions/attest` and produces one statement containing all
+four names and SHA-256 digests.
 
 Failures use bounded, non-sensitive messages. Package content, tokens, hostile
 payload values, and private evidence are not printed.

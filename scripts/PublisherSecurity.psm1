@@ -146,16 +146,21 @@ function Read-PackageIdentity {
         }
 
         [long] $expandedBytes = 0
+        $entryPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($entry in $archive.Entries) {
             $entryPath = $entry.FullName
             $normalizedEntryPath = $entryPath.TrimEnd('/')
             $segments = @($normalizedEntryPath.Split('/'))
             $unixMode = (($entry.ExternalAttributes -shr 16) -band 0xF000)
             if ([string]::IsNullOrEmpty($normalizedEntryPath) -or $entryPath.Contains('\') -or
-                $entryPath.StartsWith('/') -or $entryPath.Contains(':') -or
+                $entryPath.StartsWith('/') -or $entryPath.Contains(':') -or $entryPath.EndsWith('//') -or
+                -not [string]::Equals($entryPath, $entryPath.Normalize([Text.NormalizationForm]::FormC), [StringComparison]::Ordinal) -or
                 $segments.Count -eq 0 -or $segments -contains '' -or $segments -contains '.' -or $segments -contains '..' -or
                 $unixMode -eq 0xA000) {
                 throw 'The package contains an unsafe or ambiguous archive entry.'
+            }
+            if (-not $entryPaths.Add($normalizedEntryPath)) {
+                throw 'The package contains duplicate or case-ambiguous archive entries.'
             }
             if ($entry.Length -lt 0 -or $expandedBytes -gt ($MaximumExpandedBytes - $entry.Length)) {
                 throw 'The package expanded content exceeds the validation boundary.'
@@ -245,6 +250,10 @@ function Read-PackageIdentity {
         if ([string]::IsNullOrWhiteSpace($repositoryUrl)) {
             throw 'The package repository URL is missing.'
         }
+        $repositoryCommit = $repositoryNodes[0].GetAttribute('commit')
+        if ($repositoryCommit -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The package repository commit is missing or malformed.'
+        }
 
         if ($RequireSymbolsPackage) {
             $packageTypes = @($metadata.ChildNodes | Where-Object {
@@ -266,6 +275,7 @@ function Read-PackageIdentity {
             PackageId = $packageId
             Version = $packageVersion
             Repository = ConvertFrom-PackageRepositoryUrl -Url $repositoryUrl
+            SourceCommit = $repositoryCommit
         }
     }
     finally {
@@ -420,67 +430,178 @@ function Get-ReleaseBundleLayout {
 function Test-PortablePdbSourceLinkBytes {
     param(
         [Parameter(Mandatory)][byte[]] $Bytes,
-        [Parameter(Mandatory)][string] $SourceLinkMarker
+        [Parameter(Mandatory)][string] $ExpectedSourceUrlPrefix
     )
 
-    # Validate the ECMA-335 metadata root and bounded stream directory before
-    # inspecting SourceLink-bearing heaps. This rejects files that merely prefix
-    # arbitrary content with the portable-PDB signature.
-    if ($Bytes.Length -lt 32 -or [BitConverter]::ToUInt32($Bytes, 0) -ne 0x424A5342) { return $false }
-    $versionLength = [BitConverter]::ToUInt32($Bytes, 12)
-    if ($versionLength -eq 0 -or $versionLength -gt 256 -or 16 + $versionLength + 4 -gt $Bytes.Length) { return $false }
-    $streamDirectory = 16 + [int] $versionLength
-    $streamDirectory = ($streamDirectory + 3) -band -4
-    if ($streamDirectory + 4 -gt $Bytes.Length) { return $false }
-    $streamCount = [BitConverter]::ToUInt16($Bytes, $streamDirectory + 2)
-    if ($streamCount -lt 4 -or $streamCount -gt 16) { return $false }
+    try {
+        # Validate the ECMA-335 metadata root and bounded stream directory. A
+        # signature plus an unrelated URL in a blob heap is not a Portable PDB.
+        if ($Bytes.Length -lt 32 -or [BitConverter]::ToUInt32($Bytes, 0) -ne 0x424A5342) { return $false }
+        $versionLength = [BitConverter]::ToUInt32($Bytes, 12)
+        if ($versionLength -eq 0 -or $versionLength -gt 256 -or 16 + $versionLength + 4 -gt $Bytes.Length) { return $false }
+        $streamDirectory = (16 + [int] $versionLength + 3) -band -4
+        if ($streamDirectory + 4 -gt $Bytes.Length) { return $false }
+        $streamCount = [BitConverter]::ToUInt16($Bytes, $streamDirectory + 2)
+        if ($streamCount -lt 5 -or $streamCount -gt 16) { return $false }
 
-    $cursor = $streamDirectory + 4
-    $streams = @{}
-    for ($index = 0; $index -lt $streamCount; $index++) {
-        if ($cursor + 8 -gt $Bytes.Length) { return $false }
-        $offset = [BitConverter]::ToUInt32($Bytes, $cursor)
-        $size = [BitConverter]::ToUInt32($Bytes, $cursor + 4)
-        $nameStart = $cursor + 8
-        $nameEnd = $nameStart
-        while ($nameEnd -lt $Bytes.Length -and $nameEnd -lt $nameStart + 32 -and $Bytes[$nameEnd] -ne 0) { $nameEnd++ }
-        if ($nameEnd -ge $Bytes.Length -or $nameEnd -ge $nameStart + 32) { return $false }
-        $name = [Text.Encoding]::ASCII.GetString($Bytes, $nameStart, $nameEnd - $nameStart)
-        if ([string]::IsNullOrEmpty($name) -or $streams.ContainsKey($name)) { return $false }
-        $cursor = ($nameEnd + 1 + 3) -band -4
-        if ($size -eq 0 -or $offset -gt $Bytes.Length -or $size -gt ($Bytes.Length - $offset)) { return $false }
-        $streams[$name] = [pscustomobject]@{ Offset = [int] $offset; Size = [int] $size }
-    }
-    foreach ($required in @('#Pdb', '#~', '#Strings', '#GUID', '#Blob')) {
-        if (-not $streams.ContainsKey($required)) { return $false }
-    }
-    foreach ($stream in $streams.Values) {
-        if ($stream.Offset -lt $cursor) { return $false }
-    }
-
-    $guidStream = $streams['#GUID']
-    $sourceLinkGuid = [Guid] 'CC110556-A091-4D38-9FEC-25AB9A351A6A'
-    $guidBytes = $sourceLinkGuid.ToByteArray()
-    $guidFound = $false
-    for ($offset = $guidStream.Offset; $offset -le $guidStream.Offset + $guidStream.Size - 16; $offset += 16) {
-        $match = $true
-        for ($byte = 0; $byte -lt 16; $byte++) {
-            if ($Bytes[$offset + $byte] -ne $guidBytes[$byte]) { $match = $false; break }
+        $cursor = $streamDirectory + 4
+        $streams = @{}
+        for ($index = 0; $index -lt $streamCount; $index++) {
+            if ($cursor + 8 -gt $Bytes.Length) { return $false }
+            $offset = [BitConverter]::ToUInt32($Bytes, $cursor)
+            $size = [BitConverter]::ToUInt32($Bytes, $cursor + 4)
+            $nameStart = $cursor + 8
+            $nameEnd = $nameStart
+            while ($nameEnd -lt $Bytes.Length -and $nameEnd -lt $nameStart + 32 -and $Bytes[$nameEnd] -ne 0) { $nameEnd++ }
+            if ($nameEnd -ge $Bytes.Length -or $nameEnd -ge $nameStart + 32) { return $false }
+            $name = [Text.Encoding]::ASCII.GetString($Bytes, $nameStart, $nameEnd - $nameStart)
+            if ($name -cnotmatch '^#[A-Za-z~]+$' -or $streams.ContainsKey($name)) { return $false }
+            $cursor = ($nameEnd + 1 + 3) -band -4
+            if ($size -eq 0 -or $offset -gt $Bytes.Length -or $size -gt ($Bytes.Length - $offset)) { return $false }
+            $streams[$name] = [pscustomobject]@{ Offset = [int] $offset; Size = [int] $size }
         }
-        if ($match) { $guidFound = $true; break }
-    }
-    if (-not $guidFound) { return $false }
+        foreach ($required in @('#Pdb', '#~', '#Strings', '#GUID', '#Blob')) {
+            if (-not $streams.ContainsKey($required)) { return $false }
+        }
+        $lastEnd = $cursor
+        foreach ($stream in @($streams.Values | Sort-Object Offset)) {
+            if ($stream.Offset -lt $lastEnd) { return $false }
+            $lastEnd = $stream.Offset + $stream.Size
+        }
 
-    $blobStream = $streams['#Blob']
-    $blobText = [Text.Encoding]::UTF8.GetString($Bytes, $blobStream.Offset, $blobStream.Size)
-    return $blobText.Contains($SourceLinkMarker)
+        # Portable PDB #Pdb supplies referenced type-system row counts used by
+        # coded indexes in the debug metadata tables.
+        $rowCounts = [uint64[]]::new(64)
+        $pdb = $streams['#Pdb']
+        if ($pdb.Size -lt 32) { return $false }
+        $referencedTables = [BitConverter]::ToUInt64($Bytes, $pdb.Offset + 24)
+        $pdbCursor = $pdb.Offset + 32
+        for ($table = 0; $table -lt 64; $table++) {
+            if (($referencedTables -band ([uint64] 1 -shl $table)) -ne 0) {
+                if ($pdbCursor + 4 -gt $pdb.Offset + $pdb.Size) { return $false }
+                $rowCounts[$table] = [BitConverter]::ToUInt32($Bytes, $pdbCursor)
+                $pdbCursor += 4
+            }
+        }
+        if ($pdbCursor -ne $pdb.Offset + $pdb.Size) { return $false }
+
+        $tables = $streams['#~']
+        if ($tables.Size -lt 24) { return $false }
+        $heapSizes = $Bytes[$tables.Offset + 6]
+        $validTables = [BitConverter]::ToUInt64($Bytes, $tables.Offset + 8)
+        $tableCursor = $tables.Offset + 24
+        for ($table = 0; $table -lt 64; $table++) {
+            if (($validTables -band ([uint64] 1 -shl $table)) -ne 0) {
+                if ($table -lt 48 -or $table -gt 55 -or $tableCursor + 4 -gt $tables.Offset + $tables.Size) { return $false }
+                $rowCounts[$table] = [BitConverter]::ToUInt32($Bytes, $tableCursor)
+                $tableCursor += 4
+            }
+        }
+        if (($validTables -band ([uint64] 1 -shl 55)) -eq 0) { return $false }
+
+        $stringIndexSize = if (($heapSizes -band 0x01) -ne 0) { 4 } else { 2 }
+        $guidIndexSize = if (($heapSizes -band 0x02) -ne 0) { 4 } else { 2 }
+        $blobIndexSize = if (($heapSizes -band 0x04) -ne 0) { 4 } else { 2 }
+        $tableIndexSize = @{}
+        foreach ($table in @(0x06, 0x30, 0x32, 0x33, 0x34, 0x35)) {
+            $tableIndexSize[$table] = if ($rowCounts[$table] -lt 65536) { 2 } else { 4 }
+        }
+        $hasCustomTables = @(0x06,0x04,0x01,0x02,0x08,0x09,0x0A,0x00,0x0E,0x17,0x14,0x11,0x1A,0x1B,0x20,0x23,0x26,0x27,0x28,0x2A,0x2C,0x2B,0x30,0x32,0x33,0x34,0x35)
+        [uint64] $largestHasCustomTable = 0
+        foreach ($table in $hasCustomTables) {
+            if ($rowCounts[$table] -gt $largestHasCustomTable) { $largestHasCustomTable = $rowCounts[$table] }
+        }
+        $hasCustomIndexSize = if ($largestHasCustomTable -lt 2048) { 2 } else { 4 }
+
+        $rowSizes = @{
+            48 = $blobIndexSize + $guidIndexSize + $blobIndexSize + $guidIndexSize
+            49 = $tableIndexSize[0x30] + $blobIndexSize
+            50 = $tableIndexSize[0x06] + $tableIndexSize[0x35] + $tableIndexSize[0x33] + $tableIndexSize[0x34] + 8
+            51 = 4 + $stringIndexSize
+            52 = $stringIndexSize + $blobIndexSize
+            53 = $tableIndexSize[0x35] + $blobIndexSize
+            54 = $tableIndexSize[0x06] * 2
+            55 = $hasCustomIndexSize + $guidIndexSize + $blobIndexSize
+        }
+        for ($table = 48; $table -lt 55; $table++) {
+            [uint64] $tableBytes = $rowCounts[$table] * $rowSizes[$table]
+            if ($tableBytes -gt (($tables.Offset + $tables.Size) - $tableCursor)) { return $false }
+            $tableCursor += [int] $tableBytes
+        }
+        if ($rowCounts[55] -eq 0 -or $rowCounts[55] -gt 65536) { return $false }
+        [uint64] $customDebugBytes = $rowCounts[55] * $rowSizes[55]
+        if ($customDebugBytes -gt (($tables.Offset + $tables.Size) - $tableCursor)) { return $false }
+
+        $guidHeap = $streams['#GUID']
+        $blobHeap = $streams['#Blob']
+        $sourceLinkGuidBytes = ([Guid] 'CC110556-A091-4D38-9FEC-25AB9A351A6A').ToByteArray()
+        $sourceLinkJson = @()
+        for ($row = 0; $row -lt $rowCounts[55]; $row++) {
+            if ($tableCursor + $rowSizes[55] -gt $tables.Offset + $tables.Size) { return $false }
+            $parent = if ($hasCustomIndexSize -eq 2) { [BitConverter]::ToUInt16($Bytes, $tableCursor) } else { [BitConverter]::ToUInt32($Bytes, $tableCursor) }
+            $tableCursor += $hasCustomIndexSize
+            $kind = if ($guidIndexSize -eq 2) { [BitConverter]::ToUInt16($Bytes, $tableCursor) } else { [BitConverter]::ToUInt32($Bytes, $tableCursor) }
+            $tableCursor += $guidIndexSize
+            $value = if ($blobIndexSize -eq 2) { [BitConverter]::ToUInt16($Bytes, $tableCursor) } else { [BitConverter]::ToUInt32($Bytes, $tableCursor) }
+            $tableCursor += $blobIndexSize
+
+            if ($kind -eq 0) { continue }
+            [uint64] $guidOffset = $guidHeap.Offset + (($kind - 1) * 16)
+            if ($guidOffset + 16 -gt $guidHeap.Offset + $guidHeap.Size) { return $false }
+            $kindMatches = $true
+            for ($byte = 0; $byte -lt 16; $byte++) {
+                if ($Bytes[$guidOffset + $byte] -ne $sourceLinkGuidBytes[$byte]) { $kindMatches = $false; break }
+            }
+            if (-not $kindMatches) { continue }
+            if ($parent -ne 39 -or $value -eq 0) { return $false }
+
+            $blobOffset = $blobHeap.Offset + $value
+            if ($blobOffset -ge $blobHeap.Offset + $blobHeap.Size) { return $false }
+            $first = $Bytes[$blobOffset]
+            if (($first -band 0x80) -eq 0) { $length = $first; $prefixLength = 1 }
+            elseif (($first -band 0xC0) -eq 0x80) {
+                if ($blobOffset + 2 -gt $blobHeap.Offset + $blobHeap.Size) { return $false }
+                $length = (($first -band 0x3F) -shl 8) -bor $Bytes[$blobOffset + 1]; $prefixLength = 2
+            }
+            elseif (($first -band 0xE0) -eq 0xC0) {
+                if ($blobOffset + 4 -gt $blobHeap.Offset + $blobHeap.Size) { return $false }
+                $length = (($first -band 0x1F) -shl 24) -bor ($Bytes[$blobOffset + 1] -shl 16) -bor ($Bytes[$blobOffset + 2] -shl 8) -bor $Bytes[$blobOffset + 3]; $prefixLength = 4
+            }
+            else { return $false }
+            if ($length -le 0 -or $length -gt 1048576 -or $blobOffset + $prefixLength + $length -gt $blobHeap.Offset + $blobHeap.Size) { return $false }
+            $sourceLinkJson += [Text.Encoding]::UTF8.GetString($Bytes, $blobOffset + $prefixLength, $length)
+        }
+        $tableRemainder = ($tables.Offset + $tables.Size) - $tableCursor
+        if ($tableRemainder -gt 4) { return $false }
+        for ($padding = $tableCursor; $padding -lt $tables.Offset + $tables.Size; $padding++) {
+            if ($Bytes[$padding] -ne 0) { return $false }
+        }
+        if ($sourceLinkJson.Count -ne 1) { return $false }
+
+        try { $sourceLink = $sourceLinkJson[0] | ConvertFrom-Json }
+        catch { return $false }
+        if ($null -eq $sourceLink.PSObject.Properties['documents'] -or $null -eq $sourceLink.documents) { return $false }
+        $mappings = @($sourceLink.documents.PSObject.Properties)
+        if ($mappings.Count -eq 0 -or $mappings.Count -gt 128) { return $false }
+        foreach ($mapping in $mappings) {
+            $url = [string] $mapping.Value
+            if ($mapping.Name.Length -gt 1024 -or $url.Length -gt 2048 -or
+                -not $url.StartsWith($ExpectedSourceUrlPrefix, [StringComparison]::Ordinal) -or
+                -not $url.Contains('*') -or $url.Contains('?') -or $url.Contains('#')) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch { return $false }
 }
 
 function Test-SymbolPackageContent {
     param(
         [Parameter(Mandatory)][string] $PrimaryPackagePath,
         [Parameter(Mandatory)][string] $SymbolPackagePath,
-        [Parameter(Mandatory)][string] $Repository
+        [Parameter(Mandatory)][string] $Repository,
+        [Parameter(Mandatory)][string] $SourceCommit
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -514,7 +635,7 @@ function Test-SymbolPackageContent {
         }
 
         $repositorySlug = $Repository.Substring('AtyaLibraries/'.Length)
-        $sourceLinkMarker = "raw.githubusercontent.com/AtyaLibraries/$repositorySlug/"
+        $sourceLinkUrlPrefix = "https://raw.githubusercontent.com/AtyaLibraries/$repositorySlug/$SourceCommit/"
         foreach ($pdb in $pdbs) {
             if ($pdb.Length -le 4 -or $pdb.Length -gt 67108864) {
                 throw 'The symbol package contains an invalid Portable PDB.'
@@ -529,7 +650,7 @@ function Test-SymbolPackageContent {
                 finally { $memory.Dispose() }
             }
             finally { $stream.Dispose() }
-            if (-not (Test-PortablePdbSourceLinkBytes $bytes $sourceLinkMarker)) {
+            if (-not (Test-PortablePdbSourceLinkBytes $bytes $sourceLinkUrlPrefix)) {
                 throw 'The symbol package does not contain portable SourceLink-bound PDBs.'
             }
         }
@@ -552,10 +673,11 @@ function Test-CycloneDxPackageSbom {
     catch { throw 'The package SBOM is missing or unreadable.' }
     try { $sbom = $raw | ConvertFrom-Json }
     catch { throw 'The package SBOM is not valid JSON.' }
-    $requiredTopLevel = @('bomFormat', 'specVersion', 'version', 'metadata')
+    $requiredTopLevel = @('$schema', 'bomFormat', 'specVersion', 'version', 'serialNumber', 'metadata')
     if (@($requiredTopLevel | Where-Object { $null -eq $sbom.PSObject.Properties[$_] }).Count -ne 0 -or
         $null -eq $sbom.metadata -or $null -eq $sbom.metadata.PSObject.Properties['component'] -or
         $null -eq $sbom.metadata.component -or
+        $null -eq $sbom.metadata.component.PSObject.Properties['type'] -or
         $null -eq $sbom.metadata.component.PSObject.Properties['name'] -or
         $null -eq $sbom.metadata.component.PSObject.Properties['version']) {
         throw 'The package SBOM is missing required identity metadata.'
@@ -565,9 +687,17 @@ function Test-CycloneDxPackageSbom {
             [Globalization.CultureInfo]::InvariantCulture, [ref] $bomVersion)) {
         throw 'The package SBOM uses an unsupported or ambiguous format version.'
     }
+    $serial = [string] $sbom.serialNumber
+    $serialGuid = [Guid]::Empty
+    if (-not $serial.StartsWith('urn:uuid:', [StringComparison]::Ordinal) -or
+        -not [Guid]::TryParse($serial.Substring('urn:uuid:'.Length), [ref] $serialGuid)) {
+        throw 'The package SBOM uses an unsupported or ambiguous format version.'
+    }
     if ([regex]::Matches($raw, '"bomFormat"\s*:').Count -ne 1 -or
         [regex]::Matches($raw, '"specVersion"\s*:').Count -ne 1 -or
-        $sbom.bomFormat -cne 'CycloneDX' -or $sbom.specVersion -cne '1.6' -or $bomVersion -ne 1) {
+        [string] $sbom.'$schema' -cne 'http://cyclonedx.org/schema/bom-1.6.schema.json' -or
+        $sbom.bomFormat -cne 'CycloneDX' -or $sbom.specVersion -cne '1.6' -or $bomVersion -ne 1 -or
+        [string] $sbom.metadata.component.type -cne 'file') {
         throw 'The package SBOM uses an unsupported or ambiguous format version.'
     }
     if ([string] $sbom.metadata.component.name -cne "$PackageId.$Version.nupkg" -or
@@ -582,6 +712,7 @@ function New-ReleaseManifestText {
         [Parameter(Mandatory)][string] $Version,
         [Parameter(Mandatory)][string] $Repository,
         [Parameter(Mandatory)][string] $SourceRef,
+        [Parameter(Mandatory)][string] $SourceCommit,
         [Parameter(Mandatory)][string] $PolicyVersion,
         [Parameter(Mandatory)] $Files
     )
@@ -596,6 +727,7 @@ function New-ReleaseManifestText {
         "  `"version`": `"$Version`",",
         "  `"repository`": `"$Repository`",",
         "  `"sourceRef`": `"$SourceRef`",",
+        "  `"sourceCommit`": `"$SourceCommit`",",
         "  `"policyVersion`": `"$PolicyVersion`",",
         '  "artifacts": [',
         "    { `"name`": `"package.nupkg`", `"length`": $($Files['package.nupkg'].Length), `"sha256`": `"$primaryHash`" },",
@@ -613,6 +745,7 @@ function New-SealedReleaseBundle {
         [Parameter(Mandatory)][string] $RequestedRepository,
         [Parameter(Mandatory)][string] $RequestedVersion,
         [Parameter(Mandatory)][string] $RequestedRef,
+        [Parameter(Mandatory)][string] $RequestedCommit,
         [Parameter(Mandatory)][string] $AllowlistPath,
         [long] $MaximumPackageBytes = 268435456,
         [long] $MaximumSbomBytes = 8388608,
@@ -622,6 +755,7 @@ function New-SealedReleaseBundle {
 
     $release = ConvertTo-CanonicalReleaseRef $RequestedRef
     if ($release.Version -cne $RequestedVersion) { throw 'The requested tag and version do not agree.' }
+    if ($RequestedCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'The requested source commit is missing or malformed.' }
     $files = Get-ReleaseBundleLayout $BundlePath -MaximumPackageBytes $MaximumPackageBytes `
         -MaximumSbomBytes $MaximumSbomBytes -MaximumManifestBytes $MaximumManifestBytes `
         -MaximumAggregateBytes $MaximumAggregateBytes
@@ -629,22 +763,23 @@ function New-SealedReleaseBundle {
     $symbols = Read-PackageIdentity $files['package.snupkg'].FullName -MaximumPackageBytes $MaximumPackageBytes `
         -ExpectedExtension '.snupkg' -RequireSymbolsPackage
     if ($primary.PackageId -cne $symbols.PackageId -or $primary.Version -cne $symbols.Version -or
-        $primary.Repository -cne $symbols.Repository) {
+        $primary.Repository -cne $symbols.Repository -or $primary.SourceCommit -cne $symbols.SourceCommit) {
         throw 'The primary and symbol package identities do not agree.'
     }
     if ($primary.Version -cne $RequestedVersion) { throw 'The package version does not match the requested release tag.' }
+    if ($primary.SourceCommit -cne $RequestedCommit) { throw 'The package source commit does not match the requested release tag.' }
 
     $policy = Read-PublisherAllowlist $AllowlistPath
     $authorization = Test-PackageAuthorization $primary $RequestedRepository $policy
-    Test-SymbolPackageContent $files['package.nupkg'].FullName $files['package.snupkg'].FullName $authorization.Repository
+    Test-SymbolPackageContent $files['package.nupkg'].FullName $files['package.snupkg'].FullName $authorization.Repository $RequestedCommit
     $primaryHash = Get-Sha256Hex $files['package.nupkg'].FullName
     Test-CycloneDxPackageSbom $files['package.sbom.cdx.json'].FullName $primary.PackageId $primary.Version $primaryHash
 
     $manifestPath = Join-Path (Get-Item -LiteralPath $BundlePath).FullName 'release-manifest.json'
-    $manifest = New-ReleaseManifestText $primary.PackageId $primary.Version $authorization.Repository $release.Ref $authorization.PolicyVersion $files
+    $manifest = New-ReleaseManifestText $primary.PackageId $primary.Version $authorization.Repository $release.Ref $RequestedCommit $authorization.PolicyVersion $files
     [IO.File]::WriteAllText($manifestPath, $manifest, [Text.UTF8Encoding]::new($false))
     $null = Test-SealedReleaseBundle $BundlePath $primary.PackageId $primary.Version $authorization.Repository `
-        $release.Ref $authorization.PolicyVersion -MaximumPackageBytes $MaximumPackageBytes `
+        $release.Ref $RequestedCommit $authorization.PolicyVersion -MaximumPackageBytes $MaximumPackageBytes `
         -MaximumSbomBytes $MaximumSbomBytes -MaximumManifestBytes $MaximumManifestBytes `
         -MaximumAggregateBytes $MaximumAggregateBytes
 
@@ -653,6 +788,7 @@ function New-SealedReleaseBundle {
         Version = $primary.Version
         Repository = $authorization.Repository
         SourceRef = $release.Ref
+        SourceCommit = $RequestedCommit
         PolicyVersion = $authorization.PolicyVersion
         ManifestSha256 = Get-Sha256Hex $manifestPath
     }
@@ -666,6 +802,7 @@ function Test-SealedReleaseBundle {
         [Parameter(Mandatory)][string] $ExpectedVersion,
         [Parameter(Mandatory)][string] $ExpectedRepository,
         [Parameter(Mandatory)][string] $ExpectedRef,
+        [Parameter(Mandatory)][string] $ExpectedCommit,
         [Parameter(Mandatory)][string] $ExpectedPolicyVersion,
         [long] $MaximumPackageBytes = 268435456,
         [long] $MaximumSbomBytes = 8388608,
@@ -679,13 +816,14 @@ function Test-SealedReleaseBundle {
     $manifestRaw = [IO.File]::ReadAllText($files['release-manifest.json'].FullName)
     try { $manifest = $manifestRaw | ConvertFrom-Json }
     catch { throw 'The release manifest is not valid JSON.' }
-    $requiredManifestFields = @('schemaVersion', 'packageId', 'version', 'repository', 'sourceRef', 'policyVersion', 'artifacts')
+    $requiredManifestFields = @('schemaVersion', 'packageId', 'version', 'repository', 'sourceRef', 'sourceCommit', 'policyVersion', 'artifacts')
     if (@($requiredManifestFields | Where-Object { $null -eq $manifest.PSObject.Properties[$_] }).Count -ne 0) {
         throw 'The release manifest is missing required metadata.'
     }
     if ($manifest.schemaVersion -cne '1.0.0') { throw 'The release manifest uses an unsupported schema version.' }
     if ($manifest.packageId -cne $ExpectedPackageId -or $manifest.version -cne $ExpectedVersion -or
         $manifest.repository -cne $ExpectedRepository -or $manifest.sourceRef -cne $ExpectedRef -or
+        $manifest.sourceCommit -cne $ExpectedCommit -or
         $manifest.policyVersion -cne $ExpectedPolicyVersion) {
         throw 'The release manifest identity does not match the authorized release.'
     }
@@ -705,7 +843,7 @@ function Test-SealedReleaseBundle {
         }
     }
 
-    $expectedManifest = New-ReleaseManifestText $ExpectedPackageId $ExpectedVersion $ExpectedRepository $ExpectedRef $ExpectedPolicyVersion $files
+    $expectedManifest = New-ReleaseManifestText $ExpectedPackageId $ExpectedVersion $ExpectedRepository $ExpectedRef $ExpectedCommit $ExpectedPolicyVersion $files
     if ($manifestRaw -cne $expectedManifest) { throw 'The release manifest is not in deterministic canonical form.' }
     return $true
 }

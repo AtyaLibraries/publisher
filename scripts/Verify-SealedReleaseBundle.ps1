@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string] $ExpectedVersion,
     [Parameter(Mandatory)][string] $ExpectedRepository,
     [Parameter(Mandatory)][string] $ExpectedRef,
+    [Parameter(Mandatory)][string] $ExpectedCommit,
     [Parameter(Mandatory)][string] $ExpectedPolicyVersion
 )
 
@@ -13,6 +14,6 @@ Import-Module (Join-Path $PSScriptRoot 'PublisherSecurity.psm1') -Force
 
 $null = Test-SealedReleaseBundle -BundlePath $BundlePath -ExpectedPackageId $ExpectedPackageId `
     -ExpectedVersion $ExpectedVersion -ExpectedRepository $ExpectedRepository `
-    -ExpectedRef $ExpectedRef -ExpectedPolicyVersion $ExpectedPolicyVersion
+    -ExpectedRef $ExpectedRef -ExpectedCommit $ExpectedCommit -ExpectedPolicyVersion $ExpectedPolicyVersion
 
 Write-Output 'Sealed release bundle hashes and manifest remain unchanged.'

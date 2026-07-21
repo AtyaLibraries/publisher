@@ -6,10 +6,10 @@ A publishable release is one flat directory containing exactly these files:
 
 | File | Required validation |
 | --- | --- |
-| `package.nupkg` | one safe package; canonical id, SemVer version, and repository provenance |
-| `package.snupkg` | matching id/version/provenance; exactly one `SymbolsPackage` type; portable PDB and SourceLink validation |
+| `package.nupkg` | one safe package; canonical id, SemVer version, repository provenance, and exact source commit |
+| `package.snupkg` | matching id/version/provenance/commit; exactly one `SymbolsPackage` type; portable PDB and exact-commit SourceLink validation |
 | `package.sbom.cdx.json` | CycloneDX 1.6; identifies the primary filename and SHA-256 |
-| `release-manifest.json` | deterministic schema 1.0.0; identity, ref, policy version, lengths, and SHA-256 for the other three files |
+| `release-manifest.json` | deterministic schema 1.0.0; identity, ref, source commit, policy version, lengths, and SHA-256 for the other three files |
 
 No directory, alternate filename, additional file, link/reparse point, empty file,
 or alternate data stream belongs to the unit. Each package is limited to 256 MiB,
@@ -29,14 +29,16 @@ The ordering is a security invariant:
 1. The unprivileged build stages the exact three input files and transfers them with
    one-day retention.
 2. Trusted publisher code validates completeness, package pairing, provenance,
-   SourceLink, SBOM identity, policy authorization, and all bounds.
+   the tag-resolved commit, Portable PDB SourceLink metadata, SBOM identity,
+   policy authorization, and all bounds.
 3. Trusted code writes and verifies the deterministic manifest, producing the sealed
    four-file unit.
 4. The workflow retains the complete unit for 90 days.
 5. One provenance action attests all four exact subject paths.
 6. Trusted code verifies the retained/attested bytes again.
 7. Only then may the protected job acquire a short-lived NuGet credential.
-8. The push step verifies the unit once more immediately before publication.
+8. The push step verifies the unit once more immediately before publication with
+   the explicitly installed .NET SDK 10.0.301/NuGet client.
 
 Any failure in steps 1–6 prevents credentials and publication. Any failure in the
 push-step verification prevents the NuGet command. The build job can never acquire
