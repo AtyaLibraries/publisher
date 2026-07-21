@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  security-tests:
+    name: Security tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run publisher security regression suite
+        shell: pwsh
+        run: ./tests/Test-PublisherSecurity.ps1
+
+      - name: Run sanitization checks
+        shell: pwsh
+        run: ./tests/Test-Sanitization.ps1
+
+      - name: Check committed diff formatting
+        shell: bash
+        run: git show --check --oneline --no-renames HEAD
+
+      - name: Parse workflow YAML
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ruby -e "require 'yaml'; Dir['.github/workflows/*.yml'].each { |path| YAML.load_file(path) }"

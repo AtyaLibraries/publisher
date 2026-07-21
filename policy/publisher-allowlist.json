@@ -1,0 +1,151 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "1.5.1",
+  "packages": [
+    {
+      "packageId": "Atya.Foundation.Abstractions",
+      "repository": "Abstractions",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Templates.NuGetPackage",
+      "repository": "Atya.Templates.NuGetPackage",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Templates.UiAutomation",
+      "repository": "Atya.Templates.UiAutomation",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Hosting.BackgroundServices",
+      "repository": "BackgroundServices",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Tooling.Cli",
+      "repository": "Cli",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Http.Client",
+      "repository": "Client",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Governance.CodeQuality",
+      "repository": "CodeQuality",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Errors.Exceptions",
+      "repository": "Exceptions",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Foundation.Guards",
+      "repository": "Guards",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Web.HealthChecks",
+      "repository": "HealthChecks",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Application.Idempotency",
+      "repository": "Idempotency",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Logging",
+      "repository": "Logging",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Application.Mediator",
+      "repository": "Mediator",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Messaging.Abstractions",
+      "repository": "Messaging.Abstractions",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Messaging.InMemory",
+      "repository": "Messaging.InMemory",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Messaging.Outbox",
+      "repository": "Messaging.Outbox",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Metrics",
+      "repository": "Metrics",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Web.Middleware",
+      "repository": "Middleware",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Observation",
+      "repository": "Observation",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Diagnostics.OpenTelemetry",
+      "repository": "OpenTelemetry",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Data.Pagination",
+      "repository": "Pagination",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Foundation.Primitives",
+      "repository": "Primitives",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Errors.ProblemDetails",
+      "repository": "ProblemDetails",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Foundation.Results",
+      "repository": "Results",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Foundation.Serialization",
+      "repository": "Serialization",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Governance.Testing",
+      "repository": "Testing",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Foundation.Time",
+      "repository": "Time",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Tracing",
+      "repository": "Tracing",
+      "defaultBranch": "development"
+    },
+    {
+      "packageId": "Atya.Errors.Validation",
+      "repository": "Validation",
+      "defaultBranch": "development"
+    }
+  ]
+}
