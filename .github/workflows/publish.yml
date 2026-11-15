@@ -1,8 +1,6 @@
 name: Publish NuGet package
 
 on:
-  repository_dispatch:
-    types: [publish-package]
   workflow_dispatch:
     inputs:
       repository:
@@ -41,11 +39,11 @@ jobs:
       version: ${{ steps.request.outputs.version }}
       commit: ${{ steps.release_commit.outputs.commit }}
     env:
-      SOURCE_REPOSITORY: ${{ github.event.client_payload.repository || github.event.inputs.repository }}
-      SOURCE_REF: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
-      SOURCE_SOLUTION: ${{ github.event.client_payload.solution || github.event.inputs.solution }}
-      SOURCE_PACKAGE_PROJECT: ${{ github.event.client_payload['package-project'] || github.event.client_payload.package_project || github.event.inputs.package_project }}
-      SOURCE_GLOBAL_JSON: ${{ github.event.client_payload['global-json'] || github.event.client_payload.global_json || github.event.inputs.global_json || 'global.json' }}
+      SOURCE_REPOSITORY: ${{ github.event.inputs.repository }}
+      SOURCE_REF: ${{ github.event.inputs.ref }}
+      SOURCE_SOLUTION: ${{ github.event.inputs.solution }}
+      SOURCE_PACKAGE_PROJECT: ${{ github.event.inputs.package_project }}
+      SOURCE_GLOBAL_JSON: ${{ github.event.inputs.global_json || 'global.json' }}
 
     steps:
       - name: Checkout trusted publisher controls
