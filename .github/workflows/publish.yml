@@ -146,7 +146,7 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "package_project=$packageProject"
 
       - name: Build and pack
-        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@12bd0f142d443058477bcb167bad4b4f063de994
+        uses: AtyaLibraries/github-workflows/.github/actions/build-pack-nuget@1af7a8da0d8b01f11ab5437c0b2db0896b14e52b # v1.1.0
         with:
           solution: source/${{ steps.package_inputs.outputs.solution }}
           package-project: source/${{ steps.package_inputs.outputs.package_project }}
