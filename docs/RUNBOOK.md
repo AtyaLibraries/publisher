@@ -36,6 +36,31 @@ Optional inputs are passed the same way, for example
 `-f package_project=./src/Guards/Guards.csproj`. Paths must be relative and stay inside
 the source repository.
 
+## Content-only packages (`symbols: none`)
+
+These packages ship no binary, so they have no `.snupkg`. They are released with the
+same command but need explicit paths, because they do not follow the
+`*.sln` + single `src/**/*.csproj` layout. `solution` accepts a project file.
+Use exactly these values:
+
+| Package | `repository` | Extra `-f` values |
+|---|---|---|
+| `Atya.Build.Sdk` | `AtyaLibraries/Atya.Build.Sdk` | `-f solution=src/Atya.Build.Sdk.csproj -f package_project=src/Atya.Build.Sdk.csproj -f global_json=tests/IntegrationConsumer/global.json` |
+| `Atya.Templates.NuGetPackage` | `AtyaLibraries/Atya.Templates.NuGetPackage` | `-f solution=Atya.Templates.NuGetPackage.csproj -f package_project=Atya.Templates.NuGetPackage.csproj` |
+| `Atya.Templates.UiAutomation` | `AtyaLibraries/Atya.Templates.UiAutomation` | `-f solution=Atya.Templates.UiAutomation.csproj -f package_project=Atya.Templates.UiAutomation.csproj` |
+
+Example:
+
+```bash
+gh workflow run publish.yml --repo AtyaLibraries/publisher \
+  -f repository=AtyaLibraries/Atya.Build.Sdk -f ref=v<semver> \
+  -f solution=src/Atya.Build.Sdk.csproj -f package_project=src/Atya.Build.Sdk.csproj \
+  -f global_json=tests/IntegrationConsumer/global.json
+```
+
+The policy is not a dispatch input. If the sealed bundle shows a `.snupkg`, or the
+package contains a binary, the run fails before any credential is requested.
+
 ## Release checklist
 
 1. Make sure CI on `development` is green and the package version is the one you intend

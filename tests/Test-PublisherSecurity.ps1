@@ -392,7 +392,7 @@ try {
 
     Test-Case 'generated policy snapshot is byte-identical to recorded platform blob' {
         $actual = (& git -c "safe.directory=$($root.Replace('\', '/'))" hash-object $allowlistPath).Trim()
-        Assert-Equal 'bc4d0fbfe4e752f7db5da17ddf047a1bbb3eb4b8' $actual
+        Assert-Equal '37896038b8ab58d57e39600fa09a8c41c3f8b253' $actual
     }
 
     $validBundle = Join-Path $temp 'valid-bundle'
@@ -682,6 +682,132 @@ try {
         Assert-Throws 'A sealed artifact hash or length does not match the release manifest.' { Test-SealedReleaseBundle $manifestDuplicateSubjectBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion }
     }
 
+    # ---- symbols = none (content-only packages: MSBuild SDK, dotnet templates) ----
+    function New-ContentOnlyPackage {
+        param(
+            [Parameter(Mandatory)][string] $Path,
+            [string] $PackageId = 'Atya.Build.Sdk',
+            [string] $Version = '1.2.3',
+            [string] $RepositoryUrl = 'https://github.com/AtyaLibraries/Atya.Build.Sdk',
+            [string] $SourceCommit = '0123456789012345678901234567890123456789',
+            [hashtable] $ExtraEntries = @{}
+        )
+
+        $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $entries = [ordered]@{
+                "$PackageId.nuspec" = [Text.Encoding]::UTF8.GetBytes("<?xml version=`"1.0`"?><package><metadata><id>$PackageId</id><version>$Version</version><packageTypes><packageType name=`"MSBuildSdk`" /></packageTypes><repository type=`"git`" url=`"$RepositoryUrl`" commit=`"$SourceCommit`" /></metadata></package>")
+                'Sdk/Sdk.props' = [Text.Encoding]::UTF8.GetBytes('<Project />')
+                'Sdk/Sdk.targets' = [Text.Encoding]::UTF8.GetBytes('<Project />')
+                'Sdk/icon.png' = [byte[]] (0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0)
+                'README.md' = [Text.Encoding]::UTF8.GetBytes('# Package')
+            }
+            foreach ($name in $ExtraEntries.Keys) { $entries[$name] = [byte[]] $ExtraEntries[$name] }
+            foreach ($name in $entries.Keys) {
+                $entry = $archive.CreateEntry($name)
+                $stream = $entry.Open()
+                try { $stream.Write($entries[$name], 0, $entries[$name].Length) }
+                finally { $stream.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+
+    function New-ContentOnlyBundle([string] $Path, [hashtable] $ExtraEntries = @{}, [switch] $WithSymbolPackage) {
+        New-Item -ItemType Directory -Path $Path | Out-Null
+        $primary = Join-Path $Path 'package.nupkg'
+        New-ContentOnlyPackage -Path $primary -ExtraEntries $ExtraEntries
+        New-TestSbom (Join-Path $Path 'package.sbom.cdx.json') 'Atya.Build.Sdk' '1.2.3' $primary
+        if ($WithSymbolPackage) {
+            New-TestPackage -Path (Join-Path $Path 'package.snupkg') -SymbolsPackage `
+                -PackageId 'Atya.Build.Sdk' -RepositoryUrl 'https://github.com/AtyaLibraries/Atya.Build.Sdk'
+        }
+    }
+
+    $contentOnlyBundle = Join-Path $temp 'content-only-bundle'
+    New-ContentOnlyBundle $contentOnlyBundle
+    $contentOnlyRepository = 'AtyaLibraries/Atya.Build.Sdk'
+    Test-Case 'allowlist declares symbols none only for the three content-only packages' {
+        $policy = Read-PublisherAllowlist $allowlistPath
+        $none = @($policy.packages | Where-Object { $_.symbols -ceq 'none' } | ForEach-Object packageId | Sort-Object)
+        Assert-Equal 'Atya.Build.Sdk|Atya.Templates.NuGetPackage|Atya.Templates.UiAutomation' ($none -join '|')
+        foreach ($entry in $policy.packages) {
+            Assert-True ($entry.symbols -cin @('required', 'none')) "Entry $($entry.packageId) has no explicit symbols policy."
+        }
+        Assert-Equal 'none' (Get-RepositorySymbolsPolicy $allowlistPath 'AtyaLibraries/Atya.Build.Sdk')
+        Assert-Equal 'required' (Get-RepositorySymbolsPolicy $allowlistPath 'AtyaLibraries/Guards')
+        Assert-Equal 'required' (Get-RepositorySymbolsPolicy $allowlistPath 'AtyaLibraries/Unlisted')
+    }
+    Test-Case 'unknown symbols policy value in the allowlist fails closed' {
+        $badPolicy = Join-Path $temp 'bad-symbols-policy.json'
+        New-PolicyFile $badPolicy @([ordered]@{ packageId = 'Atya.Foundation.Guards'; repository = 'Guards'; defaultBranch = 'development'; symbols = 'optional' })
+        Assert-Throws 'The publisher allowlist contains malformed metadata.' { Read-PublisherAllowlist $badPolicy }
+    }
+    Test-Case 'assembly-free symbols-none package seals without a symbol package and records the policy' {
+        $sealed = New-SealedReleaseBundle $contentOnlyBundle $contentOnlyRepository '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath
+        Assert-Equal 'Atya.Build.Sdk' $sealed.PackageId
+        Assert-Equal 'none' $sealed.Symbols
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $contentOnlyBundle 'package.snupkg'))) 'A symbol package appeared in a symbols-none bundle.'
+        $manifestText = [IO.File]::ReadAllText((Join-Path $contentOnlyBundle 'release-manifest.json'))
+        Assert-True ($manifestText.Contains('"symbols": "none"')) 'The manifest does not record symbols none.'
+        Assert-True (-not $manifestText.Contains('package.snupkg')) 'The manifest references a symbol package.'
+        Assert-True (Test-SealedReleaseBundle $contentOnlyBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion -ExpectedSymbols none) 'Symbols-none verification failed.'
+        Assert-Throws 'The release bundle must contain exactly one symbol package.' {
+            Test-SealedReleaseBundle $contentOnlyBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion
+        }
+    }
+    Test-Case 'symbols-none manifest without the recorded policy fails verification' {
+        $tamperedBundle = Join-Path $temp 'content-only-tampered'
+        New-ContentOnlyBundle $tamperedBundle
+        $sealed = New-SealedReleaseBundle $tamperedBundle $contentOnlyRepository '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath
+        $manifestPath = Join-Path $tamperedBundle 'release-manifest.json'
+        [IO.File]::WriteAllText($manifestPath, ([IO.File]::ReadAllText($manifestPath).Replace("  `"symbols`": `"none`",`n", '')), [Text.UTF8Encoding]::new($false))
+        Assert-Throws 'The release manifest does not record the symbols-none policy.' {
+            Test-SealedReleaseBundle $tamperedBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion -ExpectedSymbols none
+        }
+    }
+    $binaryMessage = 'The symbols-none package contains a binary file.'
+    foreach ($case in @(
+        @{ Name = 'a .dll'; Entries = @{ 'tools/Atya.Build.Sdk.dll' = [byte[]] (1, 2, 3, 4) } },
+        @{ Name = 'an .exe'; Entries = @{ 'tools/run.exe' = [byte[]] (1, 2, 3, 4) } },
+        @{ Name = 'a native .so.1'; Entries = @{ 'runtimes/linux-x64/native/libx.so.1' = [byte[]] (1, 2, 3, 4) } },
+        @{ Name = 'a .dylib'; Entries = @{ 'runtimes/osx-arm64/native/libx.dylib' = [byte[]] (1, 2, 3, 4) } },
+        @{ Name = 'a PE image renamed to .txt'; Entries = @{ 'docs/notes.txt' = [byte[]] (0x4D, 0x5A, 0x90, 0x00, 0x03) } },
+        @{ Name = 'an ELF image renamed to .dat'; Entries = @{ 'docs/blob.dat' = [byte[]] (0x7F, 0x45, 0x4C, 0x46, 0x02) } },
+        @{ Name = 'a Mach-O image renamed to .md'; Entries = @{ 'docs/more.md' = [byte[]] (0xCF, 0xFA, 0xED, 0xFE, 0x07) } }
+    )) {
+        Test-Case "assembly-free package that carries $($case.Name) fails" {
+            $binaryBundle = Join-Path $temp ('binary-bundle-' + [Guid]::NewGuid().ToString('N'))
+            New-ContentOnlyBundle $binaryBundle $case.Entries
+            Assert-Throws $binaryMessage { New-SealedReleaseBundle $binaryBundle $contentOnlyRepository '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath }
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $binaryBundle 'release-manifest.json'))) 'A manifest was written for a rejected package.'
+        }
+    }
+    Test-Case 'symbols-none package that ships a .snupkg fails' {
+        $withSymbols = Join-Path $temp 'content-only-with-snupkg'
+        New-ContentOnlyBundle $withSymbols -WithSymbolPackage
+        Assert-Throws 'The symbols-none release bundle must not contain a symbol package.' {
+            New-SealedReleaseBundle $withSymbols $contentOnlyRepository '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath
+        }
+    }
+    Test-Case 'managed package cannot use the symbols-none path' {
+        $managedAsNone = Join-Path $temp 'managed-without-symbols'
+        New-Item -ItemType Directory -Path $managedAsNone | Out-Null
+        $primary = Join-Path $managedAsNone 'package.nupkg'
+        New-TestPackage -Path $primary
+        New-TestSbom (Join-Path $managedAsNone 'package.sbom.cdx.json') 'Atya.Foundation.Guards' '1.2.3' $primary
+        Assert-Throws 'The release bundle must contain exactly one symbol package.' {
+            New-SealedReleaseBundle $managedAsNone 'AtyaLibraries/Guards' '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath
+        }
+    }
+    Test-Case 'symbols-none package is still bound to its allowlisted repository' {
+        $wrongRepoBundle = Join-Path $temp 'content-only-wrong-repo'
+        New-ContentOnlyBundle $wrongRepoBundle
+        Assert-Throws 'Package repository provenance does not match the requested repository.' {
+            New-SealedReleaseBundle $wrongRepoBundle 'AtyaLibraries/Guards' '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath
+        }
+    }
+
     $workflow = (Get-Content -LiteralPath (Join-Path $root '.github/workflows/publish.yml') -Raw) -replace "`r`n", "`n"
     $buildStart = $workflow.IndexOf("  build:`n", [StringComparison]::Ordinal)
     $publishStart = $workflow.IndexOf("  publish:`n", [StringComparison]::Ordinal)
@@ -752,6 +878,30 @@ try {
         Assert-True ($workflow -match 'retention-days:\s*1' -and $workflow -match 'retention-days:\s*90') 'Inbound or sealed artifact retention is not bounded.'
         Assert-True ($publishJob -match 'inbound/release-manifest\.json') 'The deterministic release manifest is not retained and attested.'
         Assert-True ($publishJob -notmatch '(?s)Validate, complete, and seal release bundle.*(?:Copy-Item|Move-Item|Rename-Item|dotnet\s+(?:build|pack)).*Log in to NuGet\.org') 'Artifact bytes can be rebuilt, copied, or renamed after sealing.'
+    }
+    Test-Case 'content-only attestation uses three exact subjects and is gated on the symbols policy' {
+        $contentStart = $publishJob.IndexOf('Attest content-only sealed release bundle', [StringComparison]::Ordinal)
+        $completeStart = $publishJob.IndexOf('Attest complete sealed release bundle', [StringComparison]::Ordinal)
+        $verifyStart = $publishJob.IndexOf('Verify attested bytes before credential acquisition', [StringComparison]::Ordinal)
+        Assert-True ($contentStart -ge 0 -and $contentStart -lt $completeStart -and $completeStart -lt $verifyStart) 'Attestation steps are missing or out of order.'
+        $contentStep = $publishJob.Substring($contentStart, $completeStart - $contentStart)
+        $completeStep = $publishJob.Substring($completeStart, $verifyStart - $completeStart)
+        $subjects = @([regex]::Matches($contentStep, '(?m)^\s+(\./inbound/[^\s]+)\s*$') | ForEach-Object { $_.Groups[1].Value })
+        Assert-Equal ('./inbound/package.nupkg', './inbound/package.sbom.cdx.json', './inbound/release-manifest.json' -join "`n") ($subjects -join "`n")
+        Assert-True ($contentStep.Contains("if: steps.release.outputs.symbols == 'none'") -and $completeStep.Contains("if: steps.release.outputs.symbols != 'none'")) 'Attestation steps are not mutually exclusive on the sealed symbols policy.'
+        Assert-True ($contentStep -match 'actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be' -and $contentStep -notmatch 'continue-on-error') 'The content-only attestation is not pinned or can be ignored.'
+    }
+    Test-Case 'sealed symbols policy is output by the trusted gate and re-verified before login and push' {
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root 'scripts/Seal-ReleaseBundle.ps1') -Raw).Contains('symbols=')) 'The trusted gate does not output the symbols policy.'
+        $beforeLogin = $publishJob.Substring(0, $publishJob.IndexOf('Log in to NuGet.org', [StringComparison]::Ordinal))
+        Assert-True ($beforeLogin.Contains("-ExpectedSymbols '`${{ steps.release.outputs.symbols }}'")) 'The pre-credential verification does not bind the symbols policy.'
+        $pushStep = $publishJob.Substring($publishJob.IndexOf('Push package', [StringComparison]::Ordinal))
+        Assert-True ($pushStep.Contains("-ExpectedSymbols '`${{ steps.release.outputs.symbols }}'")) 'The push-time verification does not bind the symbols policy.'
+    }
+    Test-Case 'build job shapes the bundle from the trusted allowlist but cannot choose the policy' {
+        Assert-True ($buildJob.Contains('Get-RepositorySymbolsPolicy') -and $buildJob.Contains('./trusted-publisher/policy/publisher-allowlist.json')) 'The staging step does not read the trusted allowlist.'
+        Assert-True ($buildJob -notmatch 'github\.event\.inputs\.symbols|inputs\.symbols') 'A dispatch input can influence the symbols policy.'
+        Assert-True ($publishJob -notmatch 'inputs\.symbols') 'A dispatch input can influence the trusted symbols policy.'
     }
 }
 finally {

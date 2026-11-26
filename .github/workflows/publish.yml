@@ -154,8 +154,14 @@ jobs:
 
       - name: Stage bounded release bundle
         shell: pwsh
+        env:
+          REQUEST_REPOSITORY: ${{ steps.request.outputs.repository }}
         run: |
           $ErrorActionPreference = 'Stop'
+          Import-Module ./trusted-publisher/scripts/PublisherSecurity.psm1 -Force
+          $symbolsPolicy = Get-RepositorySymbolsPolicy `
+            -AllowlistPath ./trusted-publisher/policy/publisher-allowlist.json `
+            -Repository $env:REQUEST_REPOSITORY
           $packages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.nupkg -File |
             Where-Object { -not $_.Name.EndsWith('.symbols.nupkg', [StringComparison]::OrdinalIgnoreCase) })
           $symbolPackages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.snupkg -File)
@@ -163,13 +169,19 @@ jobs:
           if ($packages.Count -ne 1) {
             throw "Expected exactly one package artifact; found $($packages.Count)."
           }
-          if ($symbolPackages.Count -ne 1) {
+          if ($symbolsPolicy -ceq 'none') {
+            if ($symbolPackages.Count -ne 0) {
+              throw "A symbols-none package must not produce a symbol package; found $($symbolPackages.Count)."
+            }
+          }
+          elseif ($symbolPackages.Count -ne 1) {
             throw "Expected exactly one symbol package artifact; found $($symbolPackages.Count)."
           }
           if ($sboms.Count -ne 1) {
             throw "Expected exactly one package SBOM artifact; found $($sboms.Count)."
           }
-          $files = @($packages[0], $symbolPackages[0], $sboms[0])
+          $files = if ($symbolsPolicy -ceq 'none') { @($packages[0], $sboms[0]) }
+            else { @($packages[0], $symbolPackages[0], $sboms[0]) }
           if (@($files | Where-Object {
               $_.Length -le 0 -or ($_.Extension -in @('.nupkg', '.snupkg') -and $_.Length -gt 268435456) -or
               ($_.Name -ceq 'package.sbom.cdx.json' -and $_.Length -gt 8388608) -or
@@ -179,7 +191,9 @@ jobs:
           }
           New-Item -ItemType Directory -Path release-bundle | Out-Null
           Copy-Item -LiteralPath $packages[0].FullName -Destination release-bundle/package.nupkg
-          Copy-Item -LiteralPath $symbolPackages[0].FullName -Destination release-bundle/package.snupkg
+          if ($symbolsPolicy -cne 'none') {
+            Copy-Item -LiteralPath $symbolPackages[0].FullName -Destination release-bundle/package.snupkg
+          }
           Copy-Item -LiteralPath $sboms[0].FullName -Destination release-bundle/package.sbom.cdx.json
 
       - name: Upload bounded release bundle
@@ -254,7 +268,17 @@ jobs:
           include-hidden-files: false
           retention-days: 90
 
+      - name: Attest content-only sealed release bundle
+        if: steps.release.outputs.symbols == 'none'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            ./inbound/package.nupkg
+            ./inbound/package.sbom.cdx.json
+            ./inbound/release-manifest.json
+
       - name: Attest complete sealed release bundle
+        if: steps.release.outputs.symbols != 'none'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: |
@@ -274,6 +298,7 @@ jobs:
           -ExpectedRef '${{ steps.release.outputs.ref }}'
           -ExpectedCommit '${{ steps.release.outputs.commit }}'
           -ExpectedPolicyVersion '${{ steps.release.outputs.policy_version }}'
+          -ExpectedSymbols '${{ steps.release.outputs.symbols }}'
 
       - name: Log in to NuGet.org
         id: login
@@ -294,7 +319,8 @@ jobs:
             -ExpectedRepository '${{ steps.release.outputs.repository }}' `
             -ExpectedRef '${{ steps.release.outputs.ref }}' `
             -ExpectedCommit '${{ steps.release.outputs.commit }}' `
-            -ExpectedPolicyVersion '${{ steps.release.outputs.policy_version }}'
+            -ExpectedPolicyVersion '${{ steps.release.outputs.policy_version }}' `
+            -ExpectedSymbols '${{ steps.release.outputs.symbols }}'
           dotnet nuget push ./inbound/package.nupkg `
             --api-key $env:NUGET_API_KEY `
             --source https://api.nuget.org/v3/index.json

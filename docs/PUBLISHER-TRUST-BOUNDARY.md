@@ -77,7 +77,12 @@ values; identity and provenance casing must match canonical policy exactly.
 ATYA-018 intentionally requires every release build to produce both a portable-PDB
 `.snupkg` and the package SBOM emitted by the pinned shared build action. Repositories
 that disable symbol production or omit SourceLink are nonconforming and fail before
-credentials. There is no publisher exception or compatibility bypass: migrate the
+credentials. The one exception is a package whose allowlist entry declares
+`symbols: none` (an MSBuild SDK or a `dotnet new` template that ships no binary). The
+declaration lives only in platform policy; the trusted job then proves from the
+package bytes that no binary is present and that no `.snupkg` exists, and it records
+`symbols: none` in the sealed manifest. A package cannot select this path itself.
+For every other package there is no compatibility bypass: migrate the
 package project to the shared Build SDK defaults, validate locally, and create a new
 immutable release tag. The last compatible publisher behavior is the ATYA-016 merge
 on `main` (`1ed15efc183e77579f4eded1c3fd43710d4d60d3`).
