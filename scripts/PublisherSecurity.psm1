@@ -705,6 +705,9 @@ function Test-PackageHasNoBinaries {
     $binaryExtensions = @('.dll', '.exe', '.so', '.dylib', '.pdb', '.winmd', '.sys', '.node', '.a', '.lib',
         '.o', '.obj', '.bin', '.com', '.scr', '.ocx', '.drv', '.msi', '.class', '.jar', '.wasm')
     $magics = @('7F454C46', 'FEEDFACE', 'FEEDFACF', 'CEFAEDFE', 'CFFAEDFE', 'CAFEBABE', '0061736D')
+    # A nested archive can hide anything the checks above look for, so it is rejected too.
+    $archiveExtensions = @('.zip', '.nupkg', '.snupkg', '.gz', '.tgz', '.tar', '.7z', '.rar')
+    $archiveMagic = '504B0304'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead((Get-Item -LiteralPath $PackagePath -ErrorAction Stop).FullName)
     try {
@@ -713,6 +716,9 @@ function Test-PackageHasNoBinaries {
             $extension = [IO.Path]::GetExtension($name)
             if ($extension -cin $binaryExtensions -or $name -cmatch '\.so(?:\.[0-9]+)+$') {
                 throw 'The symbols-none package contains a binary file.'
+            }
+            if ($extension -cin $archiveExtensions) {
+                throw 'The symbols-none package contains a nested archive.'
             }
             if ($entry.Length -ge 4) {
                 $buffer = [byte[]]::new(4)
@@ -729,6 +735,9 @@ function Test-PackageHasNoBinaries {
                 $hex = [BitConverter]::ToString($buffer, 0, $read).Replace('-', '')
                 if ($read -ge 4 -and ($hex -cin $magics -or $hex.StartsWith('4D5A', [StringComparison]::Ordinal))) {
                     throw 'The symbols-none package contains a binary file.'
+                }
+                if ($read -ge 4 -and $hex -ceq $archiveMagic) {
+                    throw 'The symbols-none package contains a nested archive.'
                 }
             }
         }
