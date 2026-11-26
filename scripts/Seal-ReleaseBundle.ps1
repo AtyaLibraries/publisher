@@ -22,6 +22,7 @@ if ($env:GITHUB_OUTPUT) {
     Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "ref=$($result.SourceRef)"
     Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "commit=$($result.SourceCommit)"
     Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "policy_version=$($result.PolicyVersion)"
+    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "symbols=$($result.Symbols)"
 }
 
 Write-Output "Release bundle validation and sealing completed under policy $($result.PolicyVersion)."

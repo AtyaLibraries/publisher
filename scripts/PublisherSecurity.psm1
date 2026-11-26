@@ -316,6 +316,9 @@ function Read-PublisherAllowlist {
         $id = [string] $entry.packageId
         $repository = [string] $entry.repository
         $defaultBranch = [string] $entry.defaultBranch
+        if ($null -ne $entry.PSObject.Properties['symbols'] -and [string] $entry.symbols -cnotin @('required', 'none')) {
+            throw 'The publisher allowlist contains malformed metadata.'
+        }
         if ($id -cnotmatch '^Atya\.[A-Z][A-Za-z0-9]*(?:\.[A-Z][A-Za-z0-9]*)+$' -or
             $repository -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' -or
             $defaultBranch -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$') {
@@ -327,6 +330,32 @@ function Read-PublisherAllowlist {
     }
 
     return $policy
+}
+
+function Get-EntrySymbolsPolicy {
+    param([Parameter(Mandatory)] $Entry)
+
+    # An absent field is the managed default; the allowlist reader rejects any other value.
+    if ($null -ne $Entry.PSObject.Properties['symbols'] -and [string] $Entry.symbols -ceq 'none') { return 'none' }
+    return 'required'
+}
+
+function Get-RepositorySymbolsPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $AllowlistPath,
+        [Parameter(Mandatory)][string] $Repository
+    )
+
+    # Shapes the untrusted build bundle only. The trusted job derives the policy again from the
+    # package identity and fails closed when the two disagree.
+    $slug = (ConvertTo-CanonicalRepository -Repository $Repository).Substring('AtyaLibraries/'.Length)
+    $entries = @((Read-PublisherAllowlist -AllowlistPath $AllowlistPath).packages |
+        Where-Object { [string] $_.repository -ceq $slug })
+    if ($entries.Count -ge 1 -and @($entries | Where-Object { (Get-EntrySymbolsPolicy $_) -cne 'none' }).Count -eq 0) {
+        return 'none'
+    }
+    return 'required'
 }
 
 function Test-PackageAuthorization {
@@ -355,6 +384,7 @@ function Test-PackageAuthorization {
         PackageId = $Identity.PackageId
         Repository = $canonicalRequest
         PolicyVersion = [string] $Policy.policyVersion
+        Symbols = Get-EntrySymbolsPolicy $matches[0]
     }
 }
 
@@ -367,6 +397,7 @@ function Get-ReleaseBundleLayout {
     param(
         [Parameter(Mandatory)][string] $BundlePath,
         [switch] $IncludeManifest,
+        [ValidateSet('required', 'none')][string] $Symbols = 'required',
         [long] $MaximumPackageBytes = 268435456,
         [long] $MaximumSbomBytes = 8388608,
         [long] $MaximumManifestBytes = 65536,
@@ -387,9 +418,13 @@ function Get-ReleaseBundleLayout {
     $primaryFiles = @($files | Where-Object Extension -CEQ '.nupkg')
     $symbolFiles = @($files | Where-Object Extension -CEQ '.snupkg')
     if ($primaryFiles.Count -ne 1) { throw 'The release bundle must contain exactly one primary package.' }
-    if ($symbolFiles.Count -ne 1) { throw 'The release bundle must contain exactly one symbol package.' }
+    if ($Symbols -ceq 'none') {
+        if ($symbolFiles.Count -ne 0) { throw 'The symbols-none release bundle must not contain a symbol package.' }
+    }
+    elseif ($symbolFiles.Count -ne 1) { throw 'The release bundle must contain exactly one symbol package.' }
 
-    $expectedNames = @('package.nupkg', 'package.snupkg', 'package.sbom.cdx.json')
+    $expectedNames = if ($Symbols -ceq 'none') { @('package.nupkg', 'package.sbom.cdx.json') }
+        else { @('package.nupkg', 'package.snupkg', 'package.sbom.cdx.json') }
     if ($IncludeManifest) { $expectedNames += 'release-manifest.json' }
     if ($files.Count -ne $expectedNames.Count) {
         throw 'The release bundle contains an unexpected artifact.'
@@ -661,6 +696,66 @@ function Test-SymbolPackageContent {
     }
 }
 
+function Test-PackageHasNoBinaries {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string] $PackagePath)
+
+    # A symbols-none package must be content only. Reject by name and, independently, by
+    # executable-format magic so a renamed binary cannot pass.
+    $binaryExtensions = @('.dll', '.exe', '.so', '.dylib', '.pdb', '.winmd', '.sys', '.node', '.a', '.lib',
+        '.o', '.obj', '.bin', '.com', '.scr', '.ocx', '.drv', '.msi', '.class', '.jar', '.wasm')
+    $magics = @('7F454C46', 'FEEDFACE', 'FEEDFACF', 'CEFAEDFE', 'CFFAEDFE', 'CAFEBABE', '0061736D')
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead((Get-Item -LiteralPath $PackagePath -ErrorAction Stop).FullName)
+    try {
+        foreach ($entry in $archive.Entries | Where-Object { -not [string]::IsNullOrEmpty($_.Name) }) {
+            $name = $entry.Name.ToLowerInvariant()
+            $extension = [IO.Path]::GetExtension($name)
+            if ($extension -cin $binaryExtensions -or $name -cmatch '\.so(?:\.[0-9]+)+$') {
+                throw 'The symbols-none package contains a binary file.'
+            }
+            if ($entry.Length -ge 4) {
+                $buffer = [byte[]]::new(4)
+                $stream = $entry.Open()
+                try {
+                    [int] $read = 0
+                    while ($read -lt 4) {
+                        $count = $stream.Read($buffer, $read, 4 - $read)
+                        if ($count -le 0) { break }
+                        $read += $count
+                    }
+                }
+                finally { $stream.Dispose() }
+                $hex = [BitConverter]::ToString($buffer, 0, $read).Replace('-', '')
+                if ($read -ge 4 -and ($hex -cin $magics -or $hex.StartsWith('4D5A', [StringComparison]::Ordinal))) {
+                    throw 'The symbols-none package contains a binary file.'
+                }
+            }
+        }
+    }
+    finally { $archive.Dispose() }
+}
+
+function Resolve-BundleSymbolsPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $BundlePath,
+        [Parameter(Mandatory)][string] $AllowlistPath
+    )
+
+    # Reads policy early so the expected bundle shape is known before layout validation. Any
+    # failure resolves to the strict managed default; the authoritative check follows authorization.
+    try {
+        $primaryPath = Join-Path (Get-Item -LiteralPath $BundlePath -ErrorAction Stop).FullName 'package.nupkg'
+        $identity = Read-PackageIdentity $primaryPath
+        $matches = @((Read-PublisherAllowlist $AllowlistPath).packages |
+            Where-Object { [string] $_.packageId -ceq $identity.PackageId })
+        if ($matches.Count -eq 1) { return (Get-EntrySymbolsPolicy $matches[0]) }
+    }
+    catch { }
+    return 'required'
+}
+
 function Test-CycloneDxPackageSbom {
     param(
         [Parameter(Mandatory)][string] $Path,
@@ -714,12 +809,31 @@ function New-ReleaseManifestText {
         [Parameter(Mandatory)][string] $SourceRef,
         [Parameter(Mandatory)][string] $SourceCommit,
         [Parameter(Mandatory)][string] $PolicyVersion,
-        [Parameter(Mandatory)] $Files
+        [Parameter(Mandatory)] $Files,
+        [ValidateSet('required', 'none')][string] $Symbols = 'required'
     )
 
     $primaryHash = Get-Sha256Hex $Files['package.nupkg'].FullName
-    $symbolHash = Get-Sha256Hex $Files['package.snupkg'].FullName
     $sbomHash = Get-Sha256Hex $Files['package.sbom.cdx.json'].FullName
+    if ($Symbols -ceq 'none') {
+        return (@(
+            '{',
+            '  "schemaVersion": "1.0.0",',
+            "  `"packageId`": `"$PackageId`",",
+            "  `"version`": `"$Version`",",
+            "  `"repository`": `"$Repository`",",
+            "  `"sourceRef`": `"$SourceRef`",",
+            "  `"sourceCommit`": `"$SourceCommit`",",
+            "  `"policyVersion`": `"$PolicyVersion`",",
+            '  "symbols": "none",',
+            '  "artifacts": [',
+            "    { `"name`": `"package.nupkg`", `"length`": $($Files['package.nupkg'].Length), `"sha256`": `"$primaryHash`" },",
+            "    { `"name`": `"package.sbom.cdx.json`", `"length`": $($Files['package.sbom.cdx.json'].Length), `"sha256`": `"$sbomHash`" }",
+            '  ]',
+            '}'
+        ) -join "`n") + "`n"
+    }
+    $symbolHash = Get-Sha256Hex $Files['package.snupkg'].FullName
     return (@(
         '{',
         '  "schemaVersion": "1.0.0",',
@@ -756,30 +870,40 @@ function New-SealedReleaseBundle {
     $release = ConvertTo-CanonicalReleaseRef $RequestedRef
     if ($release.Version -cne $RequestedVersion) { throw 'The requested tag and version do not agree.' }
     if ($RequestedCommit -cnotmatch '^[0-9a-f]{40}$') { throw 'The requested source commit is missing or malformed.' }
-    $files = Get-ReleaseBundleLayout $BundlePath -MaximumPackageBytes $MaximumPackageBytes `
+    $symbolsPolicy = Resolve-BundleSymbolsPolicy $BundlePath $AllowlistPath
+    $files = Get-ReleaseBundleLayout $BundlePath -Symbols $symbolsPolicy -MaximumPackageBytes $MaximumPackageBytes `
         -MaximumSbomBytes $MaximumSbomBytes -MaximumManifestBytes $MaximumManifestBytes `
         -MaximumAggregateBytes $MaximumAggregateBytes
     $primary = Read-PackageIdentity $files['package.nupkg'].FullName -MaximumPackageBytes $MaximumPackageBytes
-    $symbols = Read-PackageIdentity $files['package.snupkg'].FullName -MaximumPackageBytes $MaximumPackageBytes `
-        -ExpectedExtension '.snupkg' -RequireSymbolsPackage
-    if ($primary.PackageId -cne $symbols.PackageId -or $primary.Version -cne $symbols.Version -or
-        $primary.Repository -cne $symbols.Repository -or $primary.SourceCommit -cne $symbols.SourceCommit) {
-        throw 'The primary and symbol package identities do not agree.'
+    if ($symbolsPolicy -cne 'none') {
+        $symbols = Read-PackageIdentity $files['package.snupkg'].FullName -MaximumPackageBytes $MaximumPackageBytes `
+            -ExpectedExtension '.snupkg' -RequireSymbolsPackage
+        if ($primary.PackageId -cne $symbols.PackageId -or $primary.Version -cne $symbols.Version -or
+            $primary.Repository -cne $symbols.Repository -or $primary.SourceCommit -cne $symbols.SourceCommit) {
+            throw 'The primary and symbol package identities do not agree.'
+        }
     }
     if ($primary.Version -cne $RequestedVersion) { throw 'The package version does not match the requested release tag.' }
     if ($primary.SourceCommit -cne $RequestedCommit) { throw 'The package source commit does not match the requested release tag.' }
 
     $policy = Read-PublisherAllowlist $AllowlistPath
     $authorization = Test-PackageAuthorization $primary $RequestedRepository $policy
-    Test-SymbolPackageContent $files['package.nupkg'].FullName $files['package.snupkg'].FullName $authorization.Repository $RequestedCommit
+    if ($authorization.Symbols -cne $symbolsPolicy) { throw 'The package symbols policy does not match the validated bundle shape.' }
+    if ($symbolsPolicy -ceq 'none') {
+        Test-PackageHasNoBinaries $files['package.nupkg'].FullName
+    }
+    else {
+        Test-SymbolPackageContent $files['package.nupkg'].FullName $files['package.snupkg'].FullName $authorization.Repository $RequestedCommit
+    }
     $primaryHash = Get-Sha256Hex $files['package.nupkg'].FullName
     Test-CycloneDxPackageSbom $files['package.sbom.cdx.json'].FullName $primary.PackageId $primary.Version $primaryHash
 
     $manifestPath = Join-Path (Get-Item -LiteralPath $BundlePath).FullName 'release-manifest.json'
-    $manifest = New-ReleaseManifestText $primary.PackageId $primary.Version $authorization.Repository $release.Ref $RequestedCommit $authorization.PolicyVersion $files
+    $manifest = New-ReleaseManifestText $primary.PackageId $primary.Version $authorization.Repository $release.Ref $RequestedCommit $authorization.PolicyVersion $files $symbolsPolicy
     [IO.File]::WriteAllText($manifestPath, $manifest, [Text.UTF8Encoding]::new($false))
     $null = Test-SealedReleaseBundle $BundlePath $primary.PackageId $primary.Version $authorization.Repository `
-        $release.Ref $RequestedCommit $authorization.PolicyVersion -MaximumPackageBytes $MaximumPackageBytes `
+        $release.Ref $RequestedCommit $authorization.PolicyVersion -ExpectedSymbols $symbolsPolicy `
+        -MaximumPackageBytes $MaximumPackageBytes `
         -MaximumSbomBytes $MaximumSbomBytes -MaximumManifestBytes $MaximumManifestBytes `
         -MaximumAggregateBytes $MaximumAggregateBytes
 
@@ -790,6 +914,7 @@ function New-SealedReleaseBundle {
         SourceRef = $release.Ref
         SourceCommit = $RequestedCommit
         PolicyVersion = $authorization.PolicyVersion
+        Symbols = $symbolsPolicy
         ManifestSha256 = Get-Sha256Hex $manifestPath
     }
 }
@@ -804,13 +929,14 @@ function Test-SealedReleaseBundle {
         [Parameter(Mandatory)][string] $ExpectedRef,
         [Parameter(Mandatory)][string] $ExpectedCommit,
         [Parameter(Mandatory)][string] $ExpectedPolicyVersion,
+        [ValidateSet('required', 'none')][string] $ExpectedSymbols = 'required',
         [long] $MaximumPackageBytes = 268435456,
         [long] $MaximumSbomBytes = 8388608,
         [long] $MaximumManifestBytes = 65536,
         [long] $MaximumAggregateBytes = 545325056
     )
 
-    $files = Get-ReleaseBundleLayout $BundlePath -IncludeManifest -MaximumPackageBytes $MaximumPackageBytes `
+    $files = Get-ReleaseBundleLayout $BundlePath -IncludeManifest -Symbols $ExpectedSymbols -MaximumPackageBytes $MaximumPackageBytes `
         -MaximumSbomBytes $MaximumSbomBytes -MaximumManifestBytes $MaximumManifestBytes `
         -MaximumAggregateBytes $MaximumAggregateBytes
     $manifestRaw = [IO.File]::ReadAllText($files['release-manifest.json'].FullName)
@@ -828,9 +954,15 @@ function Test-SealedReleaseBundle {
         throw 'The release manifest identity does not match the authorized release.'
     }
 
+    if ($ExpectedSymbols -ceq 'none' -and
+        ($null -eq $manifest.PSObject.Properties['symbols'] -or [string] $manifest.symbols -cne 'none')) {
+        throw 'The release manifest does not record the symbols-none policy.'
+    }
+    $artifactNames = if ($ExpectedSymbols -ceq 'none') { @('package.nupkg', 'package.sbom.cdx.json') }
+        else { @('package.nupkg', 'package.snupkg', 'package.sbom.cdx.json') }
     $artifacts = @($manifest.artifacts)
-    if ($artifacts.Count -ne 3) { throw 'The release manifest contains an invalid artifact set.' }
-    foreach ($name in @('package.nupkg', 'package.snupkg', 'package.sbom.cdx.json')) {
+    if ($artifacts.Count -ne $artifactNames.Count) { throw 'The release manifest contains an invalid artifact set.' }
+    foreach ($name in $artifactNames) {
         $entry = @($artifacts | Where-Object { $null -ne $_.PSObject.Properties['name'] -and [string] $_.name -ceq $name })
         [long] $recordedLength = 0
         $entryShapeValid = $entry.Count -eq 1 -and $null -ne $entry[0].PSObject.Properties['length'] -and
@@ -843,12 +975,12 @@ function Test-SealedReleaseBundle {
         }
     }
 
-    $expectedManifest = New-ReleaseManifestText $ExpectedPackageId $ExpectedVersion $ExpectedRepository $ExpectedRef $ExpectedCommit $ExpectedPolicyVersion $files
+    $expectedManifest = New-ReleaseManifestText $ExpectedPackageId $ExpectedVersion $ExpectedRepository $ExpectedRef $ExpectedCommit $ExpectedPolicyVersion $files $ExpectedSymbols
     if ($manifestRaw -cne $expectedManifest) { throw 'The release manifest is not in deterministic canonical form.' }
     return $true
 }
 
 Export-ModuleMember -Function ConvertTo-CanonicalRepository, ConvertTo-CanonicalReleaseRef,
     ConvertTo-SafeRelativePath, ConvertFrom-PackageRepositoryUrl, Read-PackageIdentity,
-    Read-PublisherAllowlist, Test-PackageAuthorization, New-SealedReleaseBundle,
-    Test-SealedReleaseBundle
+    Read-PublisherAllowlist, Test-PackageAuthorization, Get-RepositorySymbolsPolicy,
+    Test-PackageHasNoBinaries, New-SealedReleaseBundle, Test-SealedReleaseBundle

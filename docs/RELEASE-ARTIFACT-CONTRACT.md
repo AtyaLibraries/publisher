@@ -2,7 +2,11 @@
 
 ## Sealed release unit
 
-A publishable release is one flat directory containing exactly these files:
+A publishable release is one flat directory. Its shape depends on the package's
+`symbols` policy, which comes only from the generated allowlist (never from the
+package, the tag, or a dispatch input). Every allowlist entry declares it.
+
+`symbols: required` (the default for every managed package) is a four-file unit:
 
 | File | Required validation |
 | --- | --- |
@@ -10,6 +14,25 @@ A publishable release is one flat directory containing exactly these files:
 | `package.snupkg` | matching id/version/provenance/commit; exactly one `SymbolsPackage` type; portable PDB and exact-commit SourceLink validation |
 | `package.sbom.cdx.json` | CycloneDX 1.6; identifies the primary filename and SHA-256 |
 | `release-manifest.json` | deterministic schema 1.0.0; identity, ref, source commit, policy version, lengths, and SHA-256 for the other three files |
+
+`symbols: none` is for packages that ship no binary (an MSBuild SDK, a `dotnet new`
+template). It is a three-file unit: `package.nupkg`, `package.sbom.cdx.json` and
+`release-manifest.json`. There is no `.snupkg`. The manifest has one extra
+property, `"symbols": "none"`, after `policyVersion`, and lists only the package
+and the SBOM. Before sealing, trusted code requires that:
+
+- the bundle contains no `package.snupkg`, and no other extra file;
+- the `.nupkg` contains no `.dll`, `.exe`, `.so`, `.dylib`, `.pdb`, `.winmd` or
+  other native/managed code file, judged by file name **and** by executable-format
+  magic bytes (PE, ELF, Mach-O, Java class, WebAssembly), so a renamed binary is
+  rejected;
+- identity, provenance, exact source commit, tag binding, SBOM identity and the
+  PackageId-to-repository authorization pass exactly as for managed packages.
+
+A `symbols: required` package is validated byte for byte as before: a missing or
+extra `.snupkg` fails, and a managed package can never take the `none` path because
+the policy value is not package-controlled. Attestation covers every file of
+whichever unit applies, before credentials, and is verified again before the push.
 
 No directory, alternate filename, additional file, link/reparse point, empty file,
 or alternate data stream belongs to the unit. Each package is limited to 256 MiB,
@@ -75,8 +98,10 @@ ticket or pull request.
 
 ## Compatibility
 
-The required `.snupkg`, SourceLink binding, SBOM, deterministic manifest, pre-push
-retention, and pre-push attestation are mandatory for every authorized package.
-Projects relying on the former primary-package-only path must adopt the shared Build
-SDK symbol defaults before their next release. No per-package publisher exception is
-supported.
+The SBOM, deterministic manifest, pre-push retention and pre-push attestation are
+mandatory for every authorized package. The `.snupkg` and SourceLink binding are
+mandatory unless the package's allowlist entry declares `symbols: none`, which is
+granted only in platform (`ecosystem/ecosystem.json`) and verified here from the
+package bytes. Projects relying on the former primary-package-only path must adopt
+the shared Build SDK symbol defaults before their next release. There is no other
+per-package publisher exception.
