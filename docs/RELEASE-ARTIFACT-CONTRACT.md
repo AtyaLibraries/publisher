@@ -26,6 +26,9 @@ and the SBOM. Before sealing, trusted code requires that:
   other native/managed code file, judged by file name **and** by executable-format
   magic bytes (PE, ELF, Mach-O, Java class, WebAssembly), so a renamed binary is
   rejected;
+- the `.nupkg` contains no nested archive (`.zip`, `.nupkg`, `.snupkg`, `.gz`, `.tgz`,
+  `.tar`, `.7z`, `.rar`, or any entry starting with the zip magic `504B0304`), because
+  an archive can hide content the checks above cannot see;
 - identity, provenance, exact source commit, tag binding, SBOM identity and the
   PackageId-to-repository authorization pass exactly as for managed packages.
 

@@ -783,6 +783,26 @@ try {
             Assert-True (-not (Test-Path -LiteralPath (Join-Path $binaryBundle 'release-manifest.json'))) 'A manifest was written for a rejected package.'
         }
     }
+    $archiveMessage = 'The symbols-none package contains a nested archive.'
+    foreach ($case in @(
+        @{ Name = 'a nested .zip'; Entries = @{ 'tools/payload.zip' = [byte[]] (0x50, 0x4B, 0x03, 0x04, 0, 0) } },
+        @{ Name = 'a nested .zip with no content'; Entries = @{ 'tools/empty.zip' = [byte[]] (1) } },
+        @{ Name = 'a nested .nupkg'; Entries = @{ 'tools/inner.nupkg' = [byte[]] (1, 2) } },
+        @{ Name = 'a nested .snupkg'; Entries = @{ 'tools/inner.snupkg' = [byte[]] (1, 2) } },
+        @{ Name = 'a .tgz'; Entries = @{ 'tools/a.tgz' = [byte[]] (1, 2) } },
+        @{ Name = 'a .tar'; Entries = @{ 'tools/a.tar' = [byte[]] (1, 2) } },
+        @{ Name = 'a .gz'; Entries = @{ 'tools/a.gz' = [byte[]] (1, 2) } },
+        @{ Name = 'a .7z'; Entries = @{ 'tools/a.7z' = [byte[]] (1, 2) } },
+        @{ Name = 'a .rar'; Entries = @{ 'tools/a.rar' = [byte[]] (1, 2) } },
+        @{ Name = 'a zip renamed to .dat'; Entries = @{ 'docs/blob.dat' = [byte[]] (0x50, 0x4B, 0x03, 0x04, 0x14, 0) } }
+    )) {
+        Test-Case "assembly-free package that carries $($case.Name) fails" {
+            $archiveBundle = Join-Path $temp ('archive-bundle-' + [Guid]::NewGuid().ToString('N'))
+            New-ContentOnlyBundle $archiveBundle $case.Entries
+            Assert-Throws $archiveMessage { New-SealedReleaseBundle $archiveBundle $contentOnlyRepository '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath }
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $archiveBundle 'release-manifest.json'))) 'A manifest was written for a rejected package.'
+        }
+    }
     Test-Case 'symbols-none package that ships a .snupkg fails' {
         $withSymbols = Join-Path $temp 'content-only-with-snupkg'
         New-ContentOnlyBundle $withSymbols -WithSymbolPackage
