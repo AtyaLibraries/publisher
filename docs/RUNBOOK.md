@@ -77,8 +77,8 @@ The exact paths for every package are in the monorepo's `docs/RELEASING.md`.
 ```bash
 gh workflow run publish.yml --repo AtyaLibraries/publisher \
   -f repository=AtyaLibraries/Atya -f ref=Atya.Foundation.Guards/v1.2.3 \
-  -f solution=packages/Guards/src/Guards/Guards.csproj \
-  -f package_project=packages/Guards/src/Guards/Guards.csproj
+  -f solution=packages/Foundation/Guards/src/Guards/Guards.csproj \
+  -f package_project=packages/Foundation/Guards/src/Guards/Guards.csproj
 ```
 
 ## Content-only packages (`symbols: none`)
@@ -90,7 +90,7 @@ Use exactly these values:
 
 | Package | `repository` | Extra `-f` values |
 |---|---|---|
-| `Atya.Build.Sdk` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj -f package_project=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj` |
+| `Atya.Build.Sdk` | `AtyaLibraries/Atya` | `-f solution=packages/Build/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj -f package_project=packages/Build/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj` |
 | `Atya.Templates.NuGetPackage` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Templates.NuGetPackage/Atya.Templates.NuGetPackage.csproj -f package_project=packages/Atya.Templates.NuGetPackage/Atya.Templates.NuGetPackage.csproj` |
 | `Atya.Templates.UiAutomation` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Templates.UiAutomation/Atya.Templates.UiAutomation.csproj -f package_project=packages/Atya.Templates.UiAutomation/Atya.Templates.UiAutomation.csproj` |
 
@@ -99,8 +99,8 @@ Example:
 ```bash
 gh workflow run publish.yml --repo AtyaLibraries/publisher \
   -f repository=AtyaLibraries/Atya -f ref=Atya.Build.Sdk/v<semver> \
-  -f solution=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj \
-  -f package_project=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj
+  -f solution=packages/Build/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj \
+  -f package_project=packages/Build/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj
 ```
 
 The policy is not a dispatch input. The monorepo holds managed and content-only packages
