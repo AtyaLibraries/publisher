@@ -444,7 +444,7 @@ try {
 
     Test-Case 'generated policy snapshot is byte-identical to recorded platform blob' {
         $actual = (& git -c "safe.directory=$($root.Replace('\', '/'))" hash-object $policyPath).Trim()
-        Assert-Equal '613931ce43fe789e29a5e1ca0cf397b0e8b6595d' $actual
+        Assert-Equal 'eca5503b0ba8bfa4de74388c19a4d848923a35b8' $actual
     }
 
     $validBundle = Join-Path $temp 'valid-bundle'
@@ -833,9 +833,16 @@ try {
         $none = @($deployed.packages | Where-Object { $_.symbols -ceq 'none' } | ForEach-Object packageId | Sort-Object)
         Assert-Equal 'Atya.Build.Sdk|Atya.Templates.NuGetPackage|Atya.Templates.UiAutomation' ($none -join '|')
         $monorepo = @($deployed.packages | Where-Object { $_.repository -ceq 'Atya' })
-        Assert-Equal 29 $monorepo.Count
+        Assert-Equal 27 $monorepo.Count
         foreach ($entry in $monorepo) { Assert-Equal 'main' $entry.defaultBranch }
         Assert-Equal 'mixed' (Get-RepositorySymbolsPolicy $policyPath 'AtyaLibraries/Atya')
+        # Each template is a single-package, content-only repository of its own (ADR-14 amendment).
+        foreach ($template in @('Atya.Templates.NuGetPackage', 'Atya.Templates.UiAutomation')) {
+            $entry = @($deployed.packages | Where-Object { $_.packageId -ceq $template })
+            Assert-Equal 1 $entry.Count
+            Assert-Equal $template $entry[0].repository
+            Assert-Equal 'none' (Get-RepositorySymbolsPolicy $policyPath "AtyaLibraries/$template")
+        }
         Assert-Equal 'required' (Get-RepositorySymbolsPolicy $policyPath 'AtyaLibraries/Unlisted')
     }
     Test-Case 'content-only package released from the monorepo with a package-prefixed tag seals under the deployed policy' {
