@@ -105,6 +105,7 @@ function New-TestPackage {
         [string] $RepositoryUrl = 'https://github.com/AtyaLibraries/Guards',
         [string] $SourceCommit = '0123456789012345678901234567890123456789',
         [string] $SourceLinkCommit = '',
+        [string] $SourceLinkRepository = 'Guards',
         [int] $NuspecCount = 1,
         [switch] $MalformedXml,
         [switch] $MissingId,
@@ -161,7 +162,7 @@ function New-TestPackage {
         try {
             $content = if ($SymbolsPackage) {
                 $pdbCommit = if ([string]::IsNullOrEmpty($SourceLinkCommit)) { $SourceCommit } else { $SourceLinkCommit }
-                $sourceLink = if ($MissingSourceLink) { 'https://example.invalid/' } else { "https://raw.githubusercontent.com/AtyaLibraries/Guards/$pdbCommit/" }
+                $sourceLink = if ($MissingSourceLink) { 'https://example.invalid/' } else { "https://raw.githubusercontent.com/AtyaLibraries/$SourceLinkRepository/$pdbCommit/" }
                 if ($MalformedPortablePdb) {
                     [Text.Encoding]::UTF8.GetBytes("BSJB synthetic portable pdb $sourceLink")
                 }
@@ -263,6 +264,54 @@ try {
     }
     foreach ($ref in @('v1.2', 'v1.2.3+metadata', 'v1.2.3/other', 'v01.2.3', 'v1.02.3', 'v1.2.03', 'v1.2.3-01')) {
         Test-Case "invalid semantic version fails: $ref" { Assert-Throws $invalidVersion { ConvertTo-CanonicalReleaseRef $ref } }
+    }
+    $guardsId = 'Atya.Foundation.Guards'
+    Test-Case 'package-prefixed release tags parse in both forms' {
+        foreach ($ref in @("$guardsId/v1.2.3-preview.1", "refs/tags/$guardsId/v1.2.3-preview.1")) {
+            $release = ConvertTo-CanonicalReleaseRef $ref
+            Assert-Equal "refs/tags/$guardsId/v1.2.3-preview.1" $release.Ref
+            Assert-Equal '1.2.3-preview.1' $release.Version
+            Assert-Equal $guardsId $release.TagPrefix
+        }
+        Assert-Equal '' (ConvertTo-CanonicalReleaseRef 'v1.2.3').TagPrefix
+    }
+    $invalidPrefix = 'The release tag prefix is not a valid package id.'
+    foreach ($ref in @('/v1.2.3', 'refs/tags//v1.2.3', "$guardsId//v1.2.3", "$guardsId/../v1.2.3", '../Atya.Foundation.Guards/v1.2.3',
+            'refs/heads/Atya.Foundation.Guards/v1.2.3', 'a/b/Atya.Foundation.Guards/v1.2.3', "refs/tags/refs/tags/$guardsId/v1.2.3", "$guardsId/V1.2.3", "$guardsId/1.2.3", "$guardsId")) {
+        Test-Case "unsafe prefixed ref fails: $ref" { Assert-Throws $invalidRef { ConvertTo-CanonicalReleaseRef $ref } }
+    }
+    foreach ($ref in @("$guardsId/v1.2.3/extra", "$guardsId/v1.2", "$guardsId/v01.2.3")) {
+        Test-Case "prefixed ref with invalid version fails: $ref" { Assert-Throws $invalidVersion { ConvertTo-CanonicalReleaseRef $ref } }
+    }
+    foreach ($ref in @('Guards/v1.2.3', 'atya.Foundation.Guards/v1.2.3', 'Atya.foundation.Guards/v1.2.3', 'Atya/v1.2.3', 'Atya./v1.2.3', 'Atya.Foundation.Guards./v1.2.3',
+            'Atya.Foundation.Guards /v1.2.3', "Atya.Foundation.Guards`n/v1.2.3", 'Atya.Foundation.Gu%61rds/v1.2.3', '..%2FAtya.Foundation.Guards/v1.2.3')) {
+        Test-Case "malformed tag prefix fails: $($ref -replace "`n", '<LF>')" { Assert-Throws $invalidPrefix { ConvertTo-CanonicalReleaseRef $ref } }
+    }
+    Test-Case 'tag prefix must equal the package id exactly' {
+        Assert-ReleaseTagPackageBinding "refs/tags/$guardsId/v1.2.3" $guardsId
+        Assert-ReleaseTagPackageBinding 'refs/tags/v1.2.3' $guardsId
+    }
+    $prefixMismatch = 'The release tag prefix does not match the package id inside the package.'
+    Test-Case 'prefix for a different package id fails' {
+        Assert-Throws $prefixMismatch { Assert-ReleaseTagPackageBinding 'refs/tags/Atya.Foundation.Results/v1.2.3' $guardsId }
+    }
+    Test-Case 'prefix differing only in case fails' {
+        Assert-Throws $prefixMismatch { Assert-ReleaseTagPackageBinding 'refs/tags/Atya.Foundation.GuardS/v1.2.3' $guardsId }
+        Assert-Throws $prefixMismatch { Assert-ReleaseTagPackageBinding 'refs/tags/Atya.FOUNDATION.Guards/v1.2.3' $guardsId }
+    }
+    Test-Case 'prefix that is only a leading part of the package id fails' {
+        Assert-Throws $invalidPrefix { Assert-ReleaseTagPackageBinding 'refs/tags/Atya.Foundation/v1.2.3' $guardsId }
+        Assert-Throws $prefixMismatch { Assert-ReleaseTagPackageBinding "refs/tags/$guardsId.Extra/v1.2.3" $guardsId }
+    }
+    Test-Case 'unprefixed tag is refused for a repository that releases several packages' {
+        $multi = [pscustomobject]@{ packages = @(
+            [pscustomobject]@{ packageId = $guardsId; repository = 'Atya' },
+            [pscustomobject]@{ packageId = 'Atya.Foundation.Results'; repository = 'Atya' },
+            [pscustomobject]@{ packageId = 'Atya.Other.Single'; repository = 'Single' }) }
+        Assert-Throws 'A repository that releases several packages requires a package-prefixed release tag.' {
+            Assert-ReleaseTagPackageBinding 'refs/tags/v1.2.3' $guardsId 'Atya' $multi }
+        Assert-ReleaseTagPackageBinding 'refs/tags/v1.2.3' 'Atya.Other.Single' 'Single' $multi
+        Assert-ReleaseTagPackageBinding "refs/tags/$guardsId/v1.2.3" $guardsId 'Atya' $multi
     }
     foreach ($path in @('../secret', '/tmp/file', 'src\file.csproj', './src/file.csproj', 'src/$file.csproj', 'src//file.csproj', 'src/file.csproj/')) {
         Test-Case "unsafe path fails: $path" { Assert-Throws $invalidPath { ConvertTo-SafeRelativePath $path 'path' } }
@@ -403,6 +452,44 @@ try {
         Assert-Equal '1.2.3' $sealed.Version
         Assert-True (Test-Path -LiteralPath (Join-Path $validBundle 'release-manifest.json') -PathType Leaf) 'Release manifest was not generated.'
         Assert-True (Test-SealedReleaseBundle $validBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion) 'Sealed bundle verification failed.'
+    }
+
+    # Monorepo release path: one repository, several packages, package-prefixed tags.
+    $monoPolicy = Join-Path $temp 'mono-allowlist.json'
+    New-PolicyFile $monoPolicy @(
+        [ordered]@{ packageId = 'Atya.Foundation.Guards'; repository = 'Atya'; defaultBranch = 'main'; symbols = 'required' },
+        [ordered]@{ packageId = 'Atya.Foundation.Results'; repository = 'Atya'; defaultBranch = 'main'; symbols = 'required' })
+    function New-MonoBundle([string] $Path) {
+        New-Item -ItemType Directory -Path $Path | Out-Null
+        $primary = Join-Path $Path 'package.nupkg'
+        New-TestPackage -Path $primary -RepositoryUrl 'https://github.com/AtyaLibraries/Atya' -SourceLinkRepository 'Atya'
+        New-TestPackage -Path (Join-Path $Path 'package.snupkg') -SymbolsPackage -RepositoryUrl 'https://github.com/AtyaLibraries/Atya' -SourceLinkRepository 'Atya'
+        New-TestSbom (Join-Path $Path 'package.sbom.cdx.json') 'Atya.Foundation.Guards' '1.2.3' $primary
+    }
+    $monoBundle = Join-Path $temp 'mono-bundle'
+    New-MonoBundle $monoBundle
+    Test-Case 'monorepo bundle with the matching package-prefixed tag seals and verifies' {
+        $sealed = New-SealedReleaseBundle $monoBundle 'AtyaLibraries/Atya' '1.2.3' 'refs/tags/Atya.Foundation.Guards/v1.2.3' $sourceCommit $monoPolicy
+        Assert-Equal 'refs/tags/Atya.Foundation.Guards/v1.2.3' $sealed.SourceRef
+        Assert-True (Test-SealedReleaseBundle $monoBundle $sealed.PackageId $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion) 'Monorepo sealed bundle verification failed.'
+        # The re-check that runs before login and again before push refuses a swapped tag identity.
+        Assert-Throws $prefixMismatch {
+            Test-SealedReleaseBundle $monoBundle $sealed.PackageId $sealed.Version $sealed.Repository 'refs/tags/Atya.Foundation.Results/v1.2.3' $sealed.SourceCommit $sealed.PolicyVersion }
+        Assert-Throws $prefixMismatch {
+            Test-SealedReleaseBundle $monoBundle 'Atya.Foundation.Results' $sealed.Version $sealed.Repository $sealed.SourceRef $sealed.SourceCommit $sealed.PolicyVersion }
+    }
+    foreach ($case in @(
+            @{ Name = 'a different package id'; Ref = 'refs/tags/Atya.Foundation.Results/v1.2.3'; Message = $prefixMismatch },
+            @{ Name = 'a prefix differing only in case'; Ref = 'refs/tags/Atya.Foundation.GuardS/v1.2.3'; Message = $prefixMismatch },
+            @{ Name = 'an unprefixed tag in a multi-package repository'; Ref = 'refs/tags/v1.2.3'; Message = 'A repository that releases several packages requires a package-prefixed release tag.' },
+            @{ Name = 'an empty prefix'; Ref = 'refs/tags//v1.2.3'; Message = $invalidRef },
+            @{ Name = 'path traversal in the prefix'; Ref = 'refs/tags/../Atya.Foundation.Guards/v1.2.3'; Message = $invalidRef })) {
+        Test-Case "monorepo seal rejects $($case.Name)" {
+            $bundle = Join-Path $temp ('mono-reject-' + [Guid]::NewGuid().ToString('N'))
+            New-MonoBundle $bundle
+            Assert-Throws $case.Message { New-SealedReleaseBundle $bundle 'AtyaLibraries/Atya' '1.2.3' $case.Ref $sourceCommit $monoPolicy }
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $bundle 'release-manifest.json'))) 'A manifest was written for a rejected tag.'
+        }
     }
 
     $missingSymbolBundle = Join-Path $temp 'missing-symbol-bundle'

@@ -27,7 +27,7 @@ and `gh run watch <run-id> --repo AtyaLibraries/publisher`.
 | Input | Required | Meaning |
 |---|---|---|
 | `repository` | yes | Source repository in `owner/name` form. It must be listed in `policy/publisher-allowlist.json`. |
-| `ref` | yes | The immutable release tag, `v<semver>` or `refs/tags/v<semver>`. Branches and other refs are rejected. The tag must point at the commit that gets built. |
+| `ref` | yes | The immutable release tag: `v<semver>` or `<PackageId>/v<semver>`, each optionally written with a leading `refs/tags/`. Branches and other refs are rejected. The tag must point at the commit that gets built. See [Release tags](#release-tags). |
 | `solution` | no | Solution path in the source repository. Defaults to the single `.sln` at the repository root. |
 | `package_project` | no | Package project path in the source repository. Defaults to the single `.csproj` under `src/`. |
 | `global_json` | no | Path to `global.json` in the source repository. Defaults to `global.json`. |
@@ -35,6 +35,38 @@ and `gh run watch <run-id> --repo AtyaLibraries/publisher`.
 Optional inputs are passed the same way, for example
 `-f package_project=./src/Guards/Guards.csproj`. Paths must be relative and stay inside
 the source repository.
+
+## Release tags
+
+Two tag forms are accepted:
+
+| Form | Example | Use |
+|---|---|---|
+| `v<semver>` | `v1.2.3` | A repository that releases exactly one package. |
+| `<PackageId>/v<semver>` | `Atya.Foundation.Guards/v1.2.3` | A repository that releases several packages (the library monorepo `AtyaLibraries/Atya`, ADR-14). |
+
+Either form may be passed with a leading `refs/tags/`; the publisher always works with the
+canonical `refs/tags/...` form, so a branch can never be mistaken for a tag.
+
+For the prefixed form the prefix is **only a claim**. The trusted job reads the package id
+from the built `.nupkg` and requires the prefix to equal it exactly (ordinal,
+case-sensitive). The check runs when the release bundle is sealed, again before NuGet
+credentials are requested, and again immediately before the push, together with the
+existing tag, commit and version binding. A tag for one package therefore can never publish
+another package from the same repository.
+
+A prefix must itself look like a package id (`Atya.<Segment>.<Segment>...`). An empty
+prefix, extra or doubled slashes, `..`, spaces, a different case and a prefix that is only
+part of the package id are all rejected. For a repository that the allowlist maps to more
+than one package, the unprefixed `v<semver>` form is refused, because it would not say
+which package is being released.
+
+Example (monorepo):
+
+```bash
+gh workflow run publish.yml --repo AtyaLibraries/publisher \
+  -f repository=AtyaLibraries/Atya -f ref=Atya.Foundation.Guards/v1.2.3
+```
 
 ## Content-only packages (`symbols: none`)
 

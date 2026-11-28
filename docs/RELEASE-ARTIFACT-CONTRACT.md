@@ -48,6 +48,17 @@ in a fixed property and artifact order. Verification reconstructs the canonical
 serialization and compares it byte-for-byte as well as checking every recorded
 length and SHA-256.
 
+## Tag-to-package binding
+
+The release tag is `v<SemVer>` or `<PackageId>/v<SemVer>` (optionally under `refs/tags/`).
+The manifest records the canonical `sourceRef`. When the tag carries a package id prefix,
+trusted code requires it to equal, byte for byte and case-sensitively, the package id read
+from the `.nupkg`. This is enforced in `New-SealedReleaseBundle` (before the manifest is
+written) and in `Test-SealedReleaseBundle`, which runs before credential acquisition and
+again immediately before the push. A repository that the allowlist maps to more than one
+package refuses the unprefixed form at sealing time. A mismatch fails before any
+credential is requested.
+
 ## Publication sequence
 
 The ordering is a security invariant:

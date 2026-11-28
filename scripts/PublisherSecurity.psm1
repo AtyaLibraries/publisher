@@ -29,23 +29,65 @@ function ConvertTo-CanonicalReleaseRef {
         throw 'The source ref is too long.'
     }
 
-    $version = if ($Ref -cmatch '^refs/tags/v(.+)$') {
+    # Accepted forms, with or without a leading refs/tags/:
+    #   v<semver>                  single-package repositories
+    #   <PackageId>/v<SemVer>      repositories that release several packages
+    # The prefix is never trusted by itself: it must also equal the package id read from the
+    # .nupkg (Assert-ReleaseTagPackageBinding). A canonical ref is always under refs/tags/.
+    $tag = if ($Ref -cmatch '^refs/tags/(.+)$') { $Matches[1] } else { $Ref }
+
+    $prefix = ''
+    $version = if ($tag -cmatch '^v(.+)$') {
         $Matches[1]
     }
-    elseif ($Ref -cmatch '^v(.+)$') {
-        $Matches[1]
+    elseif ($tag -cmatch '^([^/]+)/v(.+)$') {
+        $prefix = $Matches[1]
+        $Matches[2]
     }
     else {
         throw 'The source ref is not an immutable release tag.'
+    }
+
+    if ($prefix -cne '' -and $prefix -cnotmatch '^Atya\.[A-Z][A-Za-z0-9]*(?:\.[A-Z][A-Za-z0-9]*)+\z') {
+        throw 'The release tag prefix is not a valid package id.'
     }
 
     if (-not (Test-SupportedSemanticVersion $version)) {
         throw 'The release tag does not contain a supported semantic version.'
     }
 
+    $canonical = if ($prefix -ceq '') { "refs/tags/v$version" } else { "refs/tags/$prefix/v$version" }
     return [pscustomobject]@{
-        Ref = "refs/tags/v$version"
+        Ref = $canonical
         Version = $version
+        TagPrefix = $prefix
+    }
+}
+
+function Assert-ReleaseTagPackageBinding {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $Ref,
+        [Parameter(Mandatory)][string] $PackageId,
+        # When supplied, an unprefixed tag is refused for a repository that releases more than
+        # one package, because such a tag would not say which package it releases.
+        [string] $RepositorySlug = '',
+        $Policy = $null
+    )
+
+    $release = ConvertTo-CanonicalReleaseRef $Ref
+    if ($release.TagPrefix -cne '') {
+        # Ordinal and case-sensitive: the tag names the package it releases.
+        if ($release.TagPrefix -cne $PackageId) {
+            throw 'The release tag prefix does not match the package id inside the package.'
+        }
+        return
+    }
+    if ($RepositorySlug -cne '' -and $null -ne $Policy) {
+        $siblings = @($Policy.packages | Where-Object { [string] $_.repository -ceq $RepositorySlug })
+        if ($siblings.Count -gt 1) {
+            throw 'A repository that releases several packages requires a package-prefixed release tag.'
+        }
     }
 }
 
@@ -897,6 +939,7 @@ function New-SealedReleaseBundle {
 
     $policy = Read-PublisherAllowlist $AllowlistPath
     $authorization = Test-PackageAuthorization $primary $RequestedRepository $policy
+    Assert-ReleaseTagPackageBinding $release.Ref $primary.PackageId $authorization.Repository.Substring('AtyaLibraries/'.Length) $policy
     if ($authorization.Symbols -cne $symbolsPolicy) { throw 'The package symbols policy does not match the validated bundle shape.' }
     if ($symbolsPolicy -ceq 'none') {
         Test-PackageHasNoBinaries $files['package.nupkg'].FullName
@@ -945,6 +988,9 @@ function Test-SealedReleaseBundle {
         [long] $MaximumAggregateBytes = 545325056
     )
 
+    # Runs before credential acquisition and again immediately before the push.
+    Assert-ReleaseTagPackageBinding $ExpectedRef $ExpectedPackageId
+
     $files = Get-ReleaseBundleLayout $BundlePath -IncludeManifest -Symbols $ExpectedSymbols -MaximumPackageBytes $MaximumPackageBytes `
         -MaximumSbomBytes $MaximumSbomBytes -MaximumManifestBytes $MaximumManifestBytes `
         -MaximumAggregateBytes $MaximumAggregateBytes
@@ -990,6 +1036,6 @@ function Test-SealedReleaseBundle {
 }
 
 Export-ModuleMember -Function ConvertTo-CanonicalRepository, ConvertTo-CanonicalReleaseRef,
-    ConvertTo-SafeRelativePath, ConvertFrom-PackageRepositoryUrl, Read-PackageIdentity,
+    Assert-ReleaseTagPackageBinding, ConvertTo-SafeRelativePath, ConvertFrom-PackageRepositoryUrl, Read-PackageIdentity,
     Read-PublisherAllowlist, Test-PackageAuthorization, Get-RepositorySymbolsPolicy,
     Test-PackageHasNoBinaries, New-SealedReleaseBundle, Test-SealedReleaseBundle
