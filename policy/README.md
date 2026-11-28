@@ -6,11 +6,11 @@ package catalog.
 
 The snapshot in this revision was copied from
 `generated/publisher-allowlist.json` at platform commit
-`f5efe3dfcc5764cf888acb81e80d7a8862ec3fea`. Its source blob is
-`42cc13c87d176db9025804ee59505f264ea95259`, policy version `1.7.0`, and schema
+`0110c5e8fd308202224f45834f8b166f6aac15f8`. Its source blob is
+`57299552fac7f21d7e0cb1e749575ebe2f81875e`, policy version `1.8.0`, and schema
 version `1.0.0`.
 
-The 27 library, tooling and SDK packages that moved into the library monorepo (ADR-14)
+The 29 library, tooling and SDK packages of the library monorepo (ADR-14, including the two PostgreSQL adapters)
 map to repository `Atya` on `main`; their tags are `<PackageId>/v<SemVer>`. The two template
 packages are repositories of their own (ADR-14 amendment) and use the unprefixed `v<SemVer>` tag.
 
