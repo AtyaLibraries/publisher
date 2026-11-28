@@ -394,8 +394,15 @@ function Get-RepositorySymbolsPolicy {
     $slug = (ConvertTo-CanonicalRepository -Repository $Repository).Substring('AtyaLibraries/'.Length)
     $entries = @((Read-PublisherAllowlist -AllowlistPath $AllowlistPath).packages |
         Where-Object { [string] $_.repository -ceq $slug })
-    if ($entries.Count -ge 1 -and @($entries | Where-Object { (Get-EntrySymbolsPolicy $_) -cne 'none' }).Count -eq 0) {
-        return 'none'
+    if ($entries.Count -ge 1) {
+        $policies = @($entries | ForEach-Object { Get-EntrySymbolsPolicy $_ } | Sort-Object -Unique)
+        if ($policies.Count -gt 1) {
+            # A repository that releases managed and content-only packages (the monorepo): the
+            # untrusted build can only shape the bundle from the files it produced. The trusted
+            # job derives the real policy from the package id and rejects a bundle that disagrees.
+            return 'mixed'
+        }
+        if ($policies[0] -ceq 'none') { return 'none' }
     }
     return 'required'
 }

@@ -68,6 +68,19 @@ gh workflow run publish.yml --repo AtyaLibraries/publisher \
   -f repository=AtyaLibraries/Atya -f ref=Atya.Foundation.Guards/v1.2.3
 ```
 
+## Packages in the library monorepo
+
+Every moved package is released from `AtyaLibraries/Atya` with a package-prefixed tag. Pass
+the package project as both `solution` and `package_project`; the root `global.json` is used.
+The exact paths for every package are in the monorepo's `docs/RELEASING.md`.
+
+```bash
+gh workflow run publish.yml --repo AtyaLibraries/publisher \
+  -f repository=AtyaLibraries/Atya -f ref=Atya.Foundation.Guards/v1.2.3 \
+  -f solution=packages/Guards/src/Guards/Guards.csproj \
+  -f package_project=packages/Guards/src/Guards/Guards.csproj
+```
+
 ## Content-only packages (`symbols: none`)
 
 These packages ship no binary, so they have no `.snupkg`. They are released with the
@@ -77,35 +90,36 @@ Use exactly these values:
 
 | Package | `repository` | Extra `-f` values |
 |---|---|---|
-| `Atya.Build.Sdk` | `AtyaLibraries/Atya.Build.Sdk` | `-f solution=src/Atya.Build.Sdk.csproj -f package_project=src/Atya.Build.Sdk.csproj -f global_json=tests/IntegrationConsumer/global.json` |
-| `Atya.Templates.NuGetPackage` | `AtyaLibraries/Atya.Templates.NuGetPackage` | `-f solution=Atya.Templates.NuGetPackage.csproj -f package_project=Atya.Templates.NuGetPackage.csproj` |
-| `Atya.Templates.UiAutomation` | `AtyaLibraries/Atya.Templates.UiAutomation` | `-f solution=Atya.Templates.UiAutomation.csproj -f package_project=Atya.Templates.UiAutomation.csproj` |
+| `Atya.Build.Sdk` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj -f package_project=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj` |
+| `Atya.Templates.NuGetPackage` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Templates.NuGetPackage/Atya.Templates.NuGetPackage.csproj -f package_project=packages/Atya.Templates.NuGetPackage/Atya.Templates.NuGetPackage.csproj` |
+| `Atya.Templates.UiAutomation` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Templates.UiAutomation/Atya.Templates.UiAutomation.csproj -f package_project=packages/Atya.Templates.UiAutomation/Atya.Templates.UiAutomation.csproj` |
 
 Example:
 
 ```bash
 gh workflow run publish.yml --repo AtyaLibraries/publisher \
-  -f repository=AtyaLibraries/Atya.Build.Sdk -f ref=v<semver> \
-  -f solution=src/Atya.Build.Sdk.csproj -f package_project=src/Atya.Build.Sdk.csproj \
-  -f global_json=tests/IntegrationConsumer/global.json
+  -f repository=AtyaLibraries/Atya -f ref=Atya.Build.Sdk/v<semver> \
+  -f solution=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj \
+  -f package_project=packages/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj
 ```
 
-The policy is not a dispatch input. If the sealed bundle shows a `.snupkg`, or the
-package contains a binary, the run fails before any credential is requested.
+The policy is not a dispatch input. The monorepo holds managed and content-only packages
+together, so the untrusted build only shapes its bundle from the files it produced (a
+symbol package present or absent). The trusted job derives the real policy from the package
+id inside the `.nupkg`: a managed package without a `.snupkg`, or a content-only package
+with one or with a binary, fails before any credential is requested.
 
 ## Release checklist
 
-1. Make sure CI on `development` is green and the package version is the one you intend
-   to ship.
-2. Promote `development` to `master` with a pull request and a **merge commit** (not
-   squash or rebase), so the release commit is reachable from `master`.
-3. Create the tag `v<semver>` on the resulting `master` commit and push it. Never move
-   or delete an existing release tag.
-4. Run the command above with the repository and the tag.
-5. Open the run in GitHub Actions. The `build` job runs first. The `publish` job then
-   waits on the `production` environment: review the repository, tag and commit, and
-   approve it.
-6. After the run succeeds, confirm the package and version on nuget.org and that the
+1. Make sure CI on `main` is green and the package version is the one you intend to ship.
+2. Create the annotated tag (`<PackageId>/v<semver>` in the monorepo, `v<semver>` in a
+   single-package repository) on the `main` commit and push it. Never move or delete an
+   existing release tag. There is no promotion pull request and no merge-back (ADR-13).
+3. Run the command above with the repository and the tag.
+4. Open the run in GitHub Actions. The `build` job runs first. If the `production`
+   environment requires approval, the `publish` job waits there: review the repository,
+   tag and commit, and approve it.
+5. After the run succeeds, confirm the package and version on nuget.org and that the
    run produced the sealed release bundle and attestation.
 
 ## Failures
