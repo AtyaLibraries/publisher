@@ -6,8 +6,8 @@ package catalog.
 
 The snapshot in this revision was copied from
 `generated/publisher-allowlist.json` at platform commit
-`1e6fd1b14c0980e59d7a3e78ddfcb0af3250f46a`. Its source blob is
-`eca5503b0ba8bfa4de74388c19a4d848923a35b8`, policy version `1.7.0`, and schema
+`f5efe3dfcc5764cf888acb81e80d7a8862ec3fea`. Its source blob is
+`42cc13c87d176db9025804ee59505f264ea95259`, policy version `1.7.0`, and schema
 version `1.0.0`.
 
 The 27 library, tooling and SDK packages that moved into the library monorepo (ADR-14)
