@@ -64,7 +64,7 @@ which package is being released.
 Example (monorepo):
 
 ```bash
-gh workflow run publish.yml --repo AtyaLibraries/publisher   -f repository=AtyaLibraries/Atya -f ref=Atya.Foundation.Guards/v1.2.3
+gh workflow run publish.yml --repo AtyaLibraries/publisher \n  -f repository=AtyaLibraries/Atya -f ref=Atya.Foundation.Guards/v1.2.3
 ```
 
 ## Content-only packages (`symbols: none`)
