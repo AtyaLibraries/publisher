@@ -175,12 +175,6 @@
       "repository": "Atya.Templates.UiAutomation",
       "defaultBranch": "main",
       "symbols": "none"
-    },
-    {
-      "packageId": "Atya.Foundation.Time",
-      "repository": "Time",
-      "defaultBranch": "development",
-      "symbols": "required"
     }
   ]
 }

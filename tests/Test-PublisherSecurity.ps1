@@ -444,7 +444,7 @@ try {
 
     Test-Case 'generated policy snapshot is byte-identical to recorded platform blob' {
         $actual = (& git -c "safe.directory=$($root.Replace('\', '/'))" hash-object $policyPath).Trim()
-        Assert-Equal 'eca5503b0ba8bfa4de74388c19a4d848923a35b8' $actual
+        Assert-Equal '42cc13c87d176db9025804ee59505f264ea95259' $actual
     }
 
     $validBundle = Join-Path $temp 'valid-bundle'
