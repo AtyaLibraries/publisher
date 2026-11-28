@@ -91,8 +91,8 @@ Use exactly these values:
 | Package | `repository` | Extra `-f` values |
 |---|---|---|
 | `Atya.Build.Sdk` | `AtyaLibraries/Atya` | `-f solution=packages/Build/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj -f package_project=packages/Build/Atya.Build.Sdk/src/Atya.Build.Sdk.csproj` |
-| `Atya.Templates.NuGetPackage` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Templates.NuGetPackage/Atya.Templates.NuGetPackage.csproj -f package_project=packages/Atya.Templates.NuGetPackage/Atya.Templates.NuGetPackage.csproj` |
-| `Atya.Templates.UiAutomation` | `AtyaLibraries/Atya` | `-f solution=packages/Atya.Templates.UiAutomation/Atya.Templates.UiAutomation.csproj -f package_project=packages/Atya.Templates.UiAutomation/Atya.Templates.UiAutomation.csproj` |
+| `Atya.Templates.NuGetPackage` | `AtyaLibraries/Atya.Templates.NuGetPackage` | `-f ref=v<semver> -f solution=Atya.Templates.NuGetPackage.csproj -f package_project=Atya.Templates.NuGetPackage.csproj` |
+| `Atya.Templates.UiAutomation` | `AtyaLibraries/Atya.Templates.UiAutomation` | `-f ref=v<semver> -f solution=Atya.Templates.UiAutomation.csproj -f package_project=Atya.Templates.UiAutomation.csproj` |
 
 Example:
 

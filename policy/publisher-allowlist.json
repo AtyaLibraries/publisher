@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0.0",
-  "policyVersion": "1.6.0",
+  "policyVersion": "1.7.0",
   "packages": [
     {
       "packageId": "Atya.Application.Idempotency",
@@ -147,18 +147,6 @@
       "symbols": "required"
     },
     {
-      "packageId": "Atya.Templates.NuGetPackage",
-      "repository": "Atya",
-      "defaultBranch": "main",
-      "symbols": "none"
-    },
-    {
-      "packageId": "Atya.Templates.UiAutomation",
-      "repository": "Atya",
-      "defaultBranch": "main",
-      "symbols": "none"
-    },
-    {
       "packageId": "Atya.Tooling.Cli",
       "repository": "Atya",
       "defaultBranch": "main",
@@ -175,6 +163,18 @@
       "repository": "Atya",
       "defaultBranch": "main",
       "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Templates.NuGetPackage",
+      "repository": "Atya.Templates.NuGetPackage",
+      "defaultBranch": "main",
+      "symbols": "none"
+    },
+    {
+      "packageId": "Atya.Templates.UiAutomation",
+      "repository": "Atya.Templates.UiAutomation",
+      "defaultBranch": "main",
+      "symbols": "none"
     },
     {
       "packageId": "Atya.Foundation.Time",
