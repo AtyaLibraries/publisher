@@ -6,9 +6,12 @@ package catalog.
 
 The snapshot in this revision was copied from
 `generated/publisher-allowlist.json` at platform commit
-`393c0ec00b1dc7669a4316e9bb95a79a164aacd1`. Its source blob is
-`37896038b8ab58d57e39600fa09a8c41c3f8b253`, policy version `1.5.1`, and schema
+`967bac933f329d13fe8084f63c27a56e04f72bc8`. Its source blob is
+`613931ce43fe789e29a5e1ca0cf397b0e8b6595d`, policy version `1.6.0`, and schema
 version `1.0.0`.
+
+All 29 library, template and SDK packages that moved into the library monorepo (ADR-14)
+map to repository `Atya` on `main`; their tags are `<PackageId>/v<SemVer>`.
 
 Every entry carries an explicit `symbols` value. `required` (the managed default)
 demands a SourceLink-bound `.snupkg`. `none` is declared in platform for packages that

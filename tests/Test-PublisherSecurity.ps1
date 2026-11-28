@@ -240,7 +240,10 @@ function New-TestBundle([string] $Path) {
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("publisher-security-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
-    $allowlistPath = Join-Path $root 'policy/publisher-allowlist.json'
+    # Mechanics tests use a single-repository policy fixture (the former generated policy); the
+    # generated policy that is actually deployed is checked separately through $policyPath.
+    $allowlistPath = Join-Path $PSScriptRoot 'fixtures/single-repository-allowlist.json'
+    $policyPath = Join-Path $root 'policy/publisher-allowlist.json'
     $sourceCommit = '0123456789012345678901234567890123456789'
     $invalidRepository = 'The source repository identity is not an approved AtyaLibraries owner/name value.'
     $invalidRef = 'The source ref is not an immutable release tag.'
@@ -440,8 +443,8 @@ try {
     Test-Case 'duplicate policy ids fail' { Assert-Throws 'The publisher allowlist contains duplicate or ambiguous package metadata.' { Read-PublisherAllowlist $duplicates } }
 
     Test-Case 'generated policy snapshot is byte-identical to recorded platform blob' {
-        $actual = (& git -c "safe.directory=$($root.Replace('\', '/'))" hash-object $allowlistPath).Trim()
-        Assert-Equal '37896038b8ab58d57e39600fa09a8c41c3f8b253' $actual
+        $actual = (& git -c "safe.directory=$($root.Replace('\', '/'))" hash-object $policyPath).Trim()
+        Assert-Equal '613931ce43fe789e29a5e1ca0cf397b0e8b6595d' $actual
     }
 
     $validBundle = Join-Path $temp 'valid-bundle'
@@ -824,6 +827,41 @@ try {
         Assert-Equal 'none' (Get-RepositorySymbolsPolicy $allowlistPath 'AtyaLibraries/Atya.Build.Sdk')
         Assert-Equal 'required' (Get-RepositorySymbolsPolicy $allowlistPath 'AtyaLibraries/Guards')
         Assert-Equal 'required' (Get-RepositorySymbolsPolicy $allowlistPath 'AtyaLibraries/Unlisted')
+    }
+    Test-Case 'deployed policy maps every moved package to the monorepo and declares symbols none for exactly three' {
+        $deployed = Read-PublisherAllowlist $policyPath
+        $none = @($deployed.packages | Where-Object { $_.symbols -ceq 'none' } | ForEach-Object packageId | Sort-Object)
+        Assert-Equal 'Atya.Build.Sdk|Atya.Templates.NuGetPackage|Atya.Templates.UiAutomation' ($none -join '|')
+        $monorepo = @($deployed.packages | Where-Object { $_.repository -ceq 'Atya' })
+        Assert-Equal 29 $monorepo.Count
+        foreach ($entry in $monorepo) { Assert-Equal 'main' $entry.defaultBranch }
+        Assert-Equal 'mixed' (Get-RepositorySymbolsPolicy $policyPath 'AtyaLibraries/Atya')
+        Assert-Equal 'required' (Get-RepositorySymbolsPolicy $policyPath 'AtyaLibraries/Unlisted')
+    }
+    Test-Case 'content-only package released from the monorepo with a package-prefixed tag seals under the deployed policy' {
+        $bundle = Join-Path $temp 'monorepo-content-only'
+        New-Item -ItemType Directory -Path $bundle | Out-Null
+        $primary = Join-Path $bundle 'package.nupkg'
+        New-ContentOnlyPackage -Path $primary -RepositoryUrl 'https://github.com/AtyaLibraries/Atya'
+        New-TestSbom (Join-Path $bundle 'package.sbom.cdx.json') 'Atya.Build.Sdk' '1.2.3' $primary
+        $sealed = New-SealedReleaseBundle $bundle 'AtyaLibraries/Atya' '1.2.3' 'refs/tags/Atya.Build.Sdk/v1.2.3' $sourceCommit $policyPath
+        Assert-Equal 'none' $sealed.Symbols
+        Assert-Equal 'refs/tags/Atya.Build.Sdk/v1.2.3' $sealed.SourceRef
+    }
+    Test-Case 'managed package released from the monorepo without a symbol package fails closed under the deployed policy' {
+        $bundle = Join-Path $temp 'monorepo-managed-no-symbols'
+        New-Item -ItemType Directory -Path $bundle | Out-Null
+        $primary = Join-Path $bundle 'package.nupkg'
+        New-TestPackage -Path $primary -RepositoryUrl 'https://github.com/AtyaLibraries/Atya' -SourceLinkRepository 'Atya'
+        New-TestSbom (Join-Path $bundle 'package.sbom.cdx.json') 'Atya.Foundation.Guards' '1.2.3' $primary
+        Assert-Throws 'The release bundle must contain exactly one symbol package.' {
+            New-SealedReleaseBundle $bundle 'AtyaLibraries/Atya' '1.2.3' 'refs/tags/Atya.Foundation.Guards/v1.2.3' $sourceCommit $policyPath }
+    }
+    Test-Case 'content-only package with a smuggled symbol package fails closed' {
+        $bundle = Join-Path $temp 'content-only-with-symbols'
+        New-ContentOnlyBundle $bundle -WithSymbolPackage
+        Assert-Throws 'The symbols-none release bundle must not contain a symbol package.' {
+            New-SealedReleaseBundle $bundle 'AtyaLibraries/Atya.Build.Sdk' '1.2.3' 'refs/tags/v1.2.3' $sourceCommit $allowlistPath }
     }
     Test-Case 'unknown symbols policy value in the allowlist fails closed' {
         $badPolicy = Join-Path $temp 'bad-symbols-policy.json'

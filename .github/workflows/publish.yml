@@ -165,6 +165,11 @@ jobs:
           $packages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.nupkg -File |
             Where-Object { -not $_.Name.EndsWith('.symbols.nupkg', [StringComparison]::OrdinalIgnoreCase) })
           $symbolPackages = @(Get-ChildItem -LiteralPath artifacts/packages -Filter *.snupkg -File)
+          if ($symbolsPolicy -ceq 'mixed') {
+            # Shape only. The trusted job derives the policy from the package id and fails closed
+            # when this shape (symbol package present or absent) does not match it.
+            $symbolsPolicy = if ($symbolPackages.Count -eq 0) { 'none' } else { 'required' }
+          }
           $sboms = @(Get-ChildItem -LiteralPath artifacts/packages -Filter package.sbom.cdx.json -File)
           if ($packages.Count -ne 1) {
             throw "Expected exactly one package artifact; found $($packages.Count)."

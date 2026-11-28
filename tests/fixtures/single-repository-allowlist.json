@@ -1,0 +1,186 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "1.5.1",
+  "packages": [
+    {
+      "packageId": "Atya.Foundation.Abstractions",
+      "repository": "Abstractions",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Build.Sdk",
+      "repository": "Atya.Build.Sdk",
+      "defaultBranch": "development",
+      "symbols": "none"
+    },
+    {
+      "packageId": "Atya.Templates.NuGetPackage",
+      "repository": "Atya.Templates.NuGetPackage",
+      "defaultBranch": "development",
+      "symbols": "none"
+    },
+    {
+      "packageId": "Atya.Templates.UiAutomation",
+      "repository": "Atya.Templates.UiAutomation",
+      "defaultBranch": "development",
+      "symbols": "none"
+    },
+    {
+      "packageId": "Atya.Hosting.BackgroundServices",
+      "repository": "BackgroundServices",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Tooling.Cli",
+      "repository": "Cli",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Http.Client",
+      "repository": "Client",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Governance.CodeQuality",
+      "repository": "CodeQuality",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Errors.Exceptions",
+      "repository": "Exceptions",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Foundation.Guards",
+      "repository": "Guards",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Web.HealthChecks",
+      "repository": "HealthChecks",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Application.Idempotency",
+      "repository": "Idempotency",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Logging",
+      "repository": "Logging",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Application.Mediator",
+      "repository": "Mediator",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Messaging.Abstractions",
+      "repository": "Messaging.Abstractions",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Messaging.InMemory",
+      "repository": "Messaging.InMemory",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Messaging.Outbox",
+      "repository": "Messaging.Outbox",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Metrics",
+      "repository": "Metrics",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Web.Middleware",
+      "repository": "Middleware",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Observation",
+      "repository": "Observation",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Diagnostics.OpenTelemetry",
+      "repository": "OpenTelemetry",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Data.Pagination",
+      "repository": "Pagination",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Foundation.Primitives",
+      "repository": "Primitives",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Errors.ProblemDetails",
+      "repository": "ProblemDetails",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Foundation.Results",
+      "repository": "Results",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Foundation.Serialization",
+      "repository": "Serialization",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Governance.Testing",
+      "repository": "Testing",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Foundation.Time",
+      "repository": "Time",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Diagnostics.Tracing",
+      "repository": "Tracing",
+      "defaultBranch": "development",
+      "symbols": "required"
+    },
+    {
+      "packageId": "Atya.Errors.Validation",
+      "repository": "Validation",
+      "defaultBranch": "development",
+      "symbols": "required"
+    }
+  ]
+}
